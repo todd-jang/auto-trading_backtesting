@@ -1,9 +1,11 @@
+
 export enum StockSymbol {
   SAMSUNG = '005930',
   HYNIX = '000660',
   NVIDIA = 'NVDA',
   TSMC = 'TSM',
-  MICRON = 'MU'
+  MICRON = 'MU',
+  CXMT = 'CXMT'
 }
 
 export enum Currency {
@@ -77,6 +79,12 @@ export interface AlphaFactors {
   compositeAlphaScore: number;
 }
 
+export interface FundamentalData {
+    peRatio: number;
+    epsGrowth: number; // YoY percentage
+    debtToEquity: number;
+}
+
 export interface Activity {
   id: string;
   timestamp: string;
@@ -106,6 +114,14 @@ export interface PairTrade {
   entryTime: string;
 }
 
+export interface PairsTradingSignal {
+    action: TradeAction.ENTER_PAIR_TRADE | TradeAction.EXIT_PAIR_TRADE;
+    longStock: StockSymbol;
+    shortStock: StockSymbol;
+    reason: string;
+    zScore: number;
+}
+
 export interface Portfolio {
   cash: number; // Always in KRW
   holdings: {
@@ -120,13 +136,56 @@ export interface AnalysisFocus {
     stock: Stock;
     factors: AlphaFactors;
     trend: Trend;
+    fundamentals: FundamentalData;
     activeStrategy?: HedgeFundStrategy;
     pairsSignal?: string;
 }
 
-export interface MlSignal {
-  action: 'BUY' | 'SELL' | 'HOLD';
-  confidence: number;
-  predictedPriceChangePercent: number;
-  featureImportance: { [key: string]: number };
+export interface AITradeSignal {
+    decision: TradeAction;
+    reason: string;
+    sharesToTrade: number;
+    confidence: number; // 0-1 confidence score
+    softmaxProbabilities?: { // For ML Model
+        buy: number;
+        sell: number;
+        hold: number;
+    };
+}
+
+export interface MlFeatures {
+    priceChange5m: number; // percentage
+    priceChange20m: number; // percentage
+    volatility10m: number; // percentage
+    rsi14m: number; // 0-100
+}
+
+
+export interface LiveTick {
+  symbol: StockSymbol;
+  price: number;
+  timestamp: number;
+}
+
+export interface OrderConfirmation {
+    orderId: string;
+    symbol: StockSymbol;
+    action: TradeAction;
+    shares: number;
+    filledPrice: number;
+    timestamp: number;
+    status: 'SUCCESS' | 'FAILED';
+    reason?: string;
+}
+
+export enum TransactionType {
+    DEPOSIT = 'DEPOSIT',
+    WITHDRAWAL = 'WITHDRAWAL',
+}
+
+export interface BankTransaction {
+    id: string;
+    timestamp: string;
+    type: TransactionType;
+    amount: number;
 }

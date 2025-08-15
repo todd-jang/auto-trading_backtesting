@@ -1,12 +1,4 @@
-import { ChartDataPoint, StockSymbol, TradeAction } from "../types";
-
-export interface PairsTradingSignal {
-    action: TradeAction.ENTER_PAIR_TRADE | TradeAction.EXIT_PAIR_TRADE;
-    longStock: StockSymbol;
-    shortStock: StockSymbol;
-    reason: string;
-    zScore: number;
-}
+import { ChartDataPoint, StockSymbol, TradeAction, PairsTradingSignal } from "../types";
 
 const PAIR = {
     stock1: StockSymbol.MICRON,

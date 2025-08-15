@@ -86,7 +86,7 @@ const PortfolioSummary: React.FC<PortfolioSummaryProps> = ({ portfolio, stocks, 
                     <span className="text-2xl font-bold text-cyan-600 dark:text-cyan-400">{formatCurrency(totalValue, Currency.KRW)}</span>
                 </div>
                  <div className="flex justify-between items-center">
-                    <span className="text-gray-500 dark:text-gray-400">보유 현금</span>
+                    <span className="text-gray-500 dark:text-gray-400">트레이딩 캐시</span>
                     <span className="text-lg font-medium text-gray-700 dark:text-gray-200">{formatCurrency(portfolio.cash, Currency.KRW)}</span>
                 </div>
                 <div className="flex justify-between items-center">

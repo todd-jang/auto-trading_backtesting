@@ -32,6 +32,12 @@ export const STOCKS: { [key in StockSymbol]: Stock } = {
     koreanName: '마이크론',
     currency: Currency.USD
   },
+  [StockSymbol.CXMT]: {
+    symbol: StockSymbol.CXMT,
+    name: 'ChangXin Memory Tech',
+    koreanName: '창신메모리 (CXMT)',
+    currency: Currency.USD // Simulating as USD for simplicity
+  },
 };
 
 export const STOCK_COLORS: { [key in StockSymbol]: string } = {
@@ -40,4 +46,5 @@ export const STOCK_COLORS: { [key in StockSymbol]: string } = {
   [StockSymbol.NVIDIA]: '#A78BFA', // violet-400
   [StockSymbol.TSMC]: '#FBBF24', // amber-400
   [StockSymbol.MICRON]: '#F472B6', // pink-400
+  [StockSymbol.CXMT]: '#FB923C', // orange-400
 };

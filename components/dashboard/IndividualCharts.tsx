@@ -17,7 +17,7 @@ const IndividualCharts: React.FC<IndividualChartsProps> = ({ allChartData, activ
                 {Object.values(STOCKS).map(stock => {
                     const chartData = allChartData[stock.symbol];
                     if (!chartData || chartData.length === 0) {
-                        return <div key={stock.symbol} className="h-80 flex items-center justify-center bg-gray-100 dark:bg-gray-700 rounded-lg"><p className="text-gray-400">Loading {stock.koreanName}...</p></div>;
+                        return <div key={stock.symbol} className="h-80 flex items-center justify-center bg-gray-100 dark:bg-gray-700 rounded-lg"><p className="text-gray-400">Waiting for {stock.koreanName} data...</p></div>;
                     }
                     return (
                         <CandlestickChart 

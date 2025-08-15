@@ -1,74 +1,476 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { StockSymbol, Portfolio, Activity, TradeAction, NormalizedChartDataPoint, Currency, AnalysisFocus, AlphaFactors, Trend, HedgeFundStrategy, MarketRegime, PairTrade, PositionType, Stock, CandlestickDataPoint, ChartDataPoint, MlSignal } from '../../types';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { StockSymbol, Portfolio, Activity, TradeAction, NormalizedChartDataPoint, Currency, AnalysisFocus, AlphaFactors, Trend, HedgeFundStrategy, MarketRegime, Stock, CandlestickDataPoint, ChartDataPoint, LiveTick, OrderConfirmation, BankTransaction, PositionType, FundamentalData, AITradeSignal, PairTrade, PairsTradingSignal } from '../../types';
 import { STOCKS } from '../../constants';
-import { getStrategicAllocation, getAiTradeSignal, AITradeSignal } from '../../services/geminiService';
+import { getStrategicAllocation, getAiTradeSignal, getMlInferenceSignal } from '../../services/geminiService';
 import { getExchangeRate } from '../../services/exchangeRateService';
 import { initializeAlphaFactors, getUpdatedAlphaFactors } from '../../services/alphaFactorService';
+import { initializeFundamentalData, getUpdatedFundamentalData } from '../../services/fundamentalService';
 import { calculateSMA } from '../../services/movingAverage';
-import { getPairsTradingSignal, PairsTradingSignal } from '../../services/pairsTradingService';
+import { getPairsTradingSignal } from '../../services/pairsTradingService';
 import { detectMarketRegime } from '../../services/marketRegimeService';
-import { historicalData } from '../../services/historicalDataService';
-import { initializeModel, getMlSignal } from '../../services/mlService';
+import { initialData } from '../../services/initialChartDataService';
+import { extractFeaturesFromData } from '../../services/mlService';
+import { realtimeDataService } from '../../services/realtimeDataService';
+import { executeLiveTrade } from '../../services/tradingExecutionService';
+import { virtualBankService } from '../../services/virtualBankService';
+import { sendTradeNotification } from '../../services/discordWebhookService';
 import ControlPanel from './ControlPanel';
 import CombinedStockChart from './CombinedStockChart';
 import PortfolioSummary from './PortfolioSummary';
 import ActivityLog from './ActivityLog';
 import AiAnalysisFactors from './AiAnalysisFactors';
 import IndividualCharts from './IndividualCharts';
+import VirtualBank from './VirtualBank';
+
+const AGGREGATION_INTERVAL = 5000; // 5 seconds to create a new candle
+const PAIRS_TRADE_VALUE_KRW = 2_000_000; // Value per leg of a pairs trade
 
 const Dashboard: React.FC = () => {
-    const [isRunning, setIsRunning] = useState<boolean>(false);
-    const [isLoading, setIsLoading] = useState<boolean>(false);
-    const [isHftMode, setIsHftMode] = useState<boolean>(false);
-    const [currentDateIndex, setCurrentDateIndex] = useState<number>(50);
+    const [isEngineRunning, setIsEngineRunning] = useState<boolean>(false);
+    const [isAggressiveMode, setIsAggressiveMode] = useState<boolean>(false);
+    const [isLowLatencyMode, setIsLowLatencyMode] = useState<boolean>(false);
+    
+    const priceHistoryRef = useRef<{ [key in StockSymbol]: ChartDataPoint[] }>({} as { [key in StockSymbol]: ChartDataPoint[] });
+    const lastTickRef = useRef<{ [key in StockSymbol]?: LiveTick }>({});
+    const candleAggregatorRef = useRef<{ [key in StockSymbol]?: {open: number, high: number, low: number, close: number, time: string} }>({});
+    const setupComplete = useRef(false);
 
-    const [chartData, setChartData] = useState({} as { [key in StockSymbol]: CandlestickDataPoint[] });
+    const [chartData, setChartData] = useState<{ [key in StockSymbol]: CandlestickDataPoint[] }>(initialData);
     const [normalizedChartData, setNormalizedChartData] = useState<NormalizedChartDataPoint[]>([]);
+    const [currentPrices, setCurrentPrices] = useState<{ [key in StockSymbol]: number }>(() => {
+         return (Object.keys(STOCKS) as StockSymbol[]).reduce((acc, symbol) => {
+            const data = initialData[symbol];
+            acc[symbol] = data && data.length > 0 ? data[data.length - 1].close : 0;
+            return acc;
+        }, {} as { [key in StockSymbol]: number });
+    });
 
     const [portfolio, setPortfolio] = useState<Portfolio>({
-        cash: 20000000,
+        cash: 0,
         holdings: {},
         pairTrades: {},
     });
+    const [bankBalance, setBankBalance] = useState<number>(() => virtualBankService.getBalance());
+    const [bankTransactions, setBankTransactions] = useState<BankTransaction[]>(() => virtualBankService.getTransactions());
+
     const [activityLog, setActivityLog] = useState<Activity[]>([]);
     const [exchangeRate, setExchangeRate] = useState<number>(1380);
     const [alphaFactors, setAlphaFactors] = useState<{ [key in StockSymbol]: AlphaFactors }>(initializeAlphaFactors());
+    const [fundamentalData, setFundamentalData] = useState<{ [key in StockSymbol]: FundamentalData }>(initializeFundamentalData());
     
     const [currentAnalysis, setCurrentAnalysis] = useState<AnalysisFocus | null>(null);
-    const [mlSignals, setMlSignals] = useState<{ [key in StockSymbol]?: MlSignal }>({});
+    const [mlSignals, setMlSignals] = useState<{ [key in StockSymbol]?: AITradeSignal }>({});
 
-    const [currentDate, setCurrentDate] = useState<string>('');
+    const [liveTime, setLiveTime] = useState(new Date());
     const [marketRegime, setMarketRegime] = useState<MarketRegime>(MarketRegime.NEUTRAL);
     const [activeStrategy, setActiveStrategy] = useState<HedgeFundStrategy>(HedgeFundStrategy.RISK_OFF);
     const [strategyReason, setStrategyReason] = useState("");
     const [pairsSignal, setPairsSignal] = useState<string | null>(null);
     
     useEffect(() => {
-        // Initialize chart data and ML model
-        const initialData = {} as { [key in StockSymbol]: CandlestickDataPoint[] };
-        for (const symbol in historicalData) {
-            initialData[symbol as StockSymbol] = historicalData[symbol as StockSymbol].slice(0, 50);
+        if (setupComplete.current) return;
+        setupComplete.current = true;
+
+        for (const symbol in initialData) {
+            priceHistoryRef.current[symbol as StockSymbol] = initialData[symbol as StockSymbol].map(d => ({ time: d.time, price: d.close }));
         }
-        setChartData(initialData);
-        if (historicalData[StockSymbol.SAMSUNG]?.[49]) {
-            setCurrentDate(historicalData[StockSymbol.SAMSUNG][49].time);
-        }
-        initializeModel();
+        
+        const initialFunding = async () => {
+            const initialTradingCash = 5_000_000;
+            const result = await virtualBankService.withdraw(initialTradingCash);
+            if (result.success && result.transaction) {
+                setPortfolio(p => ({...p, cash: p.cash + result.transaction!.amount }));
+                setBankBalance(result.newBalance);
+                setBankTransactions(prev => [result.transaction!, ...prev]);
+            }
+        };
+        initialFunding();
+        
+        const clockInterval = setInterval(() => setLiveTime(new Date()), 1000);
+        return () => clearInterval(clockInterval);
     }, []);
 
+    const logActivity = useCallback((action: TradeAction, stock: Stock, shares: number, price: number, reason: string) => {
+        const roundedTime = new Date(Math.floor(Date.now() / AGGREGATION_INTERVAL) * AGGREGATION_INTERVAL).toLocaleTimeString([], { hour12: false });
+        
+        const newActivity: Activity = {
+            id: new Date().toISOString() + Math.random(),
+            timestamp: new Date().toLocaleTimeString([], { hour12: false }),
+            action, stock, shares, price, reason,
+            time: roundedTime,
+        };
+        setActivityLog(prev => [newActivity, ...prev.slice(0, 199)]);
+    }, []);
 
+    const processTradeExecution = useCallback(async (stock: Stock, signal: AITradeSignal, activeStrategy: HedgeFundStrategy, isPairTradeLeg: boolean = false) => {
+        if (signal.decision === TradeAction.HOLD || signal.sharesToTrade <= 0) return;
+    
+        if (!isPairTradeLeg) {
+            await sendTradeNotification(signal, activeStrategy, currentPrices[stock.symbol], stock);
+        }
+
+        const currentPrice = currentPrices[stock.symbol];
+    
+        if (!isPairTradeLeg && (signal.decision === TradeAction.BUY || signal.decision === TradeAction.COVER)) {
+            const costInNative = signal.sharesToTrade * currentPrice;
+            const costInKrw = stock.currency === Currency.USD ? costInNative * exchangeRate : costInNative;
+    
+            if (portfolio.cash < costInKrw) {
+                const shortfall = costInKrw - portfolio.cash;
+                logActivity(signal.decision, stock, signal.sharesToTrade, currentPrice, `자금 부족. 은행에서 ${Math.ceil(shortfall).toLocaleString()}원 인출 시도.`);
+                const result = await virtualBankService.withdraw(Math.ceil(shortfall));
+    
+                if (result.success && result.transaction) {
+                    setBankBalance(result.newBalance);
+                    setBankTransactions(prev => [result.transaction!, ...prev]);
+                    setPortfolio(p => ({ ...p, cash: p.cash + result.transaction!.amount }));
+                } else {
+                    logActivity(signal.decision, stock, signal.sharesToTrade, currentPrice, `주문 실패: 은행 인출 실패.`);
+                    return;
+                }
+            }
+        }
+    
+        logActivity(signal.decision, stock, signal.sharesToTrade, currentPrice, `주문 전송: ${signal.reason}`);
+    
+        const confirmation = await executeLiveTrade({
+            symbol: stock.symbol,
+            action: signal.decision,
+            shares: signal.sharesToTrade,
+            price: currentPrice,
+        });
+    
+        if (confirmation.status === 'SUCCESS') {
+            const { shares, filledPrice, action, symbol } = confirmation;
+            
+            setPortfolio(prevPortfolio => {
+                const newPortfolio = JSON.parse(JSON.stringify(prevPortfolio)); // Deep copy for safety
+                const stockInfo = STOCKS[symbol];
+                const costInNative = shares * filledPrice;
+                const costInKrw = stockInfo.currency === Currency.USD ? costInNative * exchangeRate : costInNative;
+                const currentHolding = newPortfolio.holdings[symbol];
+
+                switch (action) {
+                    case TradeAction.BUY:
+                    case TradeAction.COVER:
+                        const positionType = action === TradeAction.BUY ? PositionType.LONG : PositionType.SHORT;
+                        if (currentHolding && currentHolding.positionType === positionType) {
+                            if (positionType === PositionType.LONG) {
+                                const newTotalShares = currentHolding.shares + shares;
+                                const newAvgPrice = ((currentHolding.avgPrice * currentHolding.shares) + costInNative) / newTotalShares;
+                                currentHolding.shares = newTotalShares;
+                                currentHolding.avgPrice = newAvgPrice;
+                            } else { // Covering a short
+                                currentHolding.shares -= shares;
+                            }
+                        } else if (positionType === PositionType.LONG) {
+                            newPortfolio.holdings[symbol] = { shares, avgPrice: filledPrice, positionType: PositionType.LONG };
+                        }
+                        if (currentHolding?.shares <= 0) delete newPortfolio.holdings[symbol];
+                        newPortfolio.cash -= costInKrw;
+                        break;
+                    
+                    case TradeAction.SELL:
+                    case TradeAction.SHORT:
+                        const sellPositionType = action === TradeAction.SELL ? PositionType.LONG : PositionType.SHORT;
+                         if (currentHolding && currentHolding.positionType === sellPositionType) {
+                            if (sellPositionType === PositionType.SHORT) {
+                                const newTotalShares = currentHolding.shares + shares;
+                                const newAvgPrice = ((currentHolding.avgPrice * currentHolding.shares) + costInNative) / newTotalShares;
+                                currentHolding.shares = newTotalShares;
+                                currentHolding.avgPrice = newAvgPrice;
+                            } else { // Selling a long
+                                currentHolding.shares -= shares;
+                            }
+                        } else if (sellPositionType === PositionType.SHORT) {
+                             newPortfolio.holdings[symbol] = { shares, avgPrice: filledPrice, positionType: PositionType.SHORT };
+                        }
+                        if (currentHolding?.shares <= 0) delete newPortfolio.holdings[symbol];
+                        newPortfolio.cash += costInKrw;
+                        break;
+                }
+                
+                return newPortfolio;
+            });
+
+            logActivity(action, stock, shares, filledPrice, `주문 체결`);
+
+            if (!isPairTradeLeg) {
+                const CASH_THRESHOLD = isAggressiveMode ? 15_000_000 : 10_000_000;
+                const CASH_BASELINE = isAggressiveMode ? 7_500_000 : 5_000_000;
+                const currentCash = portfolio.cash + (action === TradeAction.SELL || action === TradeAction.SHORT ? (shares * filledPrice * (stock.currency === Currency.USD ? exchangeRate : 1)) : 0);
+    
+                if (currentCash > CASH_THRESHOLD) {
+                    const excessCash = currentCash - CASH_BASELINE;
+                    virtualBankService.deposit(excessCash).then(depositResult => {
+                        if (depositResult.success && depositResult.transaction) {
+                            setBankBalance(depositResult.newBalance);
+                            setBankTransactions(prev => [depositResult.transaction!, ...prev]);
+                            setPortfolio(p => ({...p, cash: p.cash - excessCash}));
+                        }
+                    });
+                }
+            }
+
+        } else {
+            logActivity(signal.decision, stock, signal.sharesToTrade, currentPrice, `주문 실패: ${confirmation.reason}`);
+        }
+    }, [currentPrices, exchangeRate, logActivity, portfolio.cash, isAggressiveMode]);
+
+    const processPairsTradeExecution = useCallback(async (signal: PairsTradingSignal) => {
+        const { action, longStock: longSymbol, shortStock: shortSymbol } = signal;
+        const pairId = `${longSymbol}-${shortSymbol}`;
+
+        await sendTradeNotification(signal, HedgeFundStrategy.PAIRS_TRADING);
+
+        if (action === TradeAction.ENTER_PAIR_TRADE) {
+            if (portfolio.pairTrades[pairId]) {
+                setPairsSignal("Pairs Arb: Position already open.");
+                return;
+            }
+
+            const longStock = STOCKS[longSymbol];
+            const shortStock = STOCKS[shortSymbol];
+            const longPrice = currentPrices[longSymbol];
+            const shortPrice = currentPrices[shortSymbol];
+            
+            const longValueKrw = PAIRS_TRADE_VALUE_KRW;
+            const shortValueKrw = PAIRS_TRADE_VALUE_KRW;
+
+            const longShares = Math.floor(longValueKrw / (longPrice * (longStock.currency === Currency.USD ? exchangeRate : 1)));
+            const shortShares = Math.floor(shortValueKrw / (shortPrice * (shortStock.currency === Currency.USD ? exchangeRate : 1)));
+
+            if (longShares < 10 || shortShares < 10) {
+                 setPairsSignal("Pairs Arb: Trade size too small.");
+                 return;
+            }
+
+            logActivity(action, longStock, longShares, longPrice, `페어 트레이드 진입 (Long)`);
+            logActivity(action, shortStock, shortShares, shortPrice, `페어 트레이드 진입 (Short)`);
+
+            const longTrade = executeLiveTrade({ symbol: longSymbol, action: TradeAction.BUY, shares: longShares, price: longPrice });
+            const shortTrade = executeLiveTrade({ symbol: shortSymbol, action: TradeAction.SHORT, shares: shortShares, price: shortPrice });
+            
+            const [longConfirm, shortConfirm] = await Promise.all([longTrade, shortTrade]);
+
+            if (longConfirm.status === 'SUCCESS' && shortConfirm.status === 'SUCCESS') {
+                 setPortfolio(p => {
+                    const newPortfolio = JSON.parse(JSON.stringify(p));
+                    
+                    const newPair: PairTrade = {
+                        id: pairId,
+                        longStock: longSymbol, shortStock: shortSymbol, shares: longConfirm.shares,
+                        entryPriceLong: longConfirm.filledPrice, entryPriceShort: shortConfirm.filledPrice,
+                        entrySpread: longConfirm.filledPrice / shortConfirm.filledPrice, entryTime: new Date().toISOString()
+                    };
+                    newPortfolio.pairTrades[pairId] = newPair;
+
+                    newPortfolio.holdings[longSymbol] = { shares: longConfirm.shares, avgPrice: longConfirm.filledPrice, positionType: PositionType.LONG, pairSymbol: shortSymbol };
+                    newPortfolio.holdings[shortSymbol] = { shares: shortConfirm.shares, avgPrice: shortConfirm.filledPrice, positionType: PositionType.SHORT, pairSymbol: longSymbol };
+
+                    const longCostKrw = longConfirm.shares * longConfirm.filledPrice * (longStock.currency === Currency.USD ? exchangeRate : 1);
+                    const shortProceedsKrw = shortConfirm.shares * shortConfirm.filledPrice * (shortStock.currency === Currency.USD ? exchangeRate : 1);
+                    newPortfolio.cash = newPortfolio.cash - longCostKrw + shortProceedsKrw;
+
+                    return newPortfolio;
+                 });
+                 logActivity(TradeAction.BUY, longStock, longConfirm.shares, longConfirm.filledPrice, `페어 체결 (Long)`);
+                 logActivity(TradeAction.SHORT, shortStock, shortConfirm.shares, shortConfirm.filledPrice, `페어 체결 (Short)`);
+            } else {
+                // TODO: Handle partial execution (e.g., unwind successful leg)
+                logActivity(action, longStock, 0, 0, `페어 트레이드 실패: ${longConfirm.reason || shortConfirm.reason}`);
+            }
+
+        } else if (action === TradeAction.EXIT_PAIR_TRADE) {
+            const openPair = portfolio.pairTrades[pairId] || portfolio.pairTrades[`${shortSymbol}-${longSymbol}`];
+            if (!openPair) {
+                setPairsSignal("Pairs Arb: No position to exit.");
+                return;
+            }
+
+            const longHolding = portfolio.holdings[openPair.longStock];
+            const shortHolding = portfolio.holdings[openPair.shortStock];
+
+            if (!longHolding || !shortHolding) return;
+
+            const longStock = STOCKS[openPair.longStock];
+            const shortStock = STOCKS[openPair.shortStock];
+            
+            logActivity(action, longStock, longHolding.shares, currentPrices[openPair.longStock], `페어 트레이드 청산 (Sell)`);
+            logActivity(action, shortStock, shortHolding.shares, currentPrices[openPair.shortStock], `페어 트레이드 청산 (Cover)`);
+            
+            const sellTrade = executeLiveTrade({ symbol: openPair.longStock, action: TradeAction.SELL, shares: longHolding.shares, price: currentPrices[openPair.longStock] });
+            const coverTrade = executeLiveTrade({ symbol: openPair.shortStock, action: TradeAction.COVER, shares: shortHolding.shares, price: currentPrices[openPair.shortStock] });
+
+            const [sellConfirm, coverConfirm] = await Promise.all([sellTrade, coverTrade]);
+
+            if (sellConfirm.status === 'SUCCESS' && coverConfirm.status === 'SUCCESS') {
+                setPortfolio(p => {
+                    const newPortfolio = JSON.parse(JSON.stringify(p));
+                    delete newPortfolio.pairTrades[openPair.id];
+                    delete newPortfolio.holdings[openPair.longStock];
+                    delete newPortfolio.holdings[openPair.shortStock];
+
+                    const sellProceedsKrw = sellConfirm.shares * sellConfirm.filledPrice * (longStock.currency === Currency.USD ? exchangeRate : 1);
+                    const coverCostKrw = coverConfirm.shares * coverConfirm.filledPrice * (shortStock.currency === Currency.USD ? exchangeRate : 1);
+                    newPortfolio.cash = newPortfolio.cash + sellProceedsKrw - coverCostKrw;
+
+                    return newPortfolio;
+                });
+                logActivity(TradeAction.SELL, longStock, sellConfirm.shares, sellConfirm.filledPrice, `페어 청산 체결 (Sell)`);
+                logActivity(TradeAction.COVER, shortStock, coverConfirm.shares, coverConfirm.filledPrice, `페어 청산 체결 (Cover)`);
+            }
+        }
+    }, [portfolio.pairTrades, portfolio.holdings, currentPrices, exchangeRate, logActivity]);
+
+
+    const handleRealtimeTick = useCallback(async (tick: LiveTick) => {
+        if (!isEngineRunning) return;
+
+        setCurrentPrices(prev => ({ ...prev, [tick.symbol]: tick.price }));
+        lastTickRef.current[tick.symbol] = tick;
+        
+        const history = priceHistoryRef.current[tick.symbol];
+        if (history) {
+            history.push({ time: new Date(tick.timestamp).toLocaleTimeString([], { hour12: false }), price: tick.price });
+            if(history.length > 500) history.shift();
+        }
+        
+        const stock = STOCKS[tick.symbol];
+        const trend = calculateTrend(history);
+        const fundamentals = fundamentalData[tick.symbol];
+        
+        let decisionSignal: AITradeSignal | null = null;
+
+        const currentActiveStrategy = activeStrategy; // Capture strategy at tick time
+        
+        if (currentActiveStrategy === HedgeFundStrategy.PAIRS_TRADING) {
+            const factors = alphaFactors[tick.symbol];
+            setCurrentAnalysis({ stock, factors, trend, fundamentals, activeStrategy: currentActiveStrategy, pairsSignal: pairsSignal || undefined });
+            return;
+        }
+        
+        if (currentActiveStrategy === HedgeFundStrategy.DEEP_HEDGING) {
+            const features = extractFeaturesFromData(history);
+            const mlSignal = await getMlInferenceSignal(stock, features, isAggressiveMode, isLowLatencyMode);
+            setMlSignals(prev => ({ ...prev, [tick.symbol]: mlSignal }));
+            const factors = alphaFactors[tick.symbol];
+            setCurrentAnalysis({ stock, factors, trend, fundamentals, activeStrategy: currentActiveStrategy });
+            decisionSignal = mlSignal;
+        } else if (currentActiveStrategy === HedgeFundStrategy.ALPHA_MOMENTUM || currentActiveStrategy === HedgeFundStrategy.MEAN_REVERSION) {
+            const factors = getUpdatedAlphaFactors(alphaFactors[tick.symbol], history, currentActiveStrategy);
+            setAlphaFactors(prev => ({...prev, [tick.symbol]: factors}));
+            setCurrentAnalysis({ stock, factors, trend, fundamentals, activeStrategy: currentActiveStrategy });
+            decisionSignal = await getAiTradeSignal(stock, currentActiveStrategy, factors, trend, fundamentals, isAggressiveMode, isLowLatencyMode);
+        }
+
+        if (decisionSignal) {
+            await processTradeExecution(stock, decisionSignal, currentActiveStrategy);
+        }
+    }, [isEngineRunning, activeStrategy, alphaFactors, processTradeExecution, isAggressiveMode, isLowLatencyMode, fundamentalData, pairsSignal]);
+    
     useEffect(() => {
+        if (isEngineRunning) {
+            realtimeDataService.subscribe(handleRealtimeTick);
+        } else {
+            realtimeDataService.unsubscribe();
+        }
+        return () => realtimeDataService.unsubscribe();
+    }, [isEngineRunning, handleRealtimeTick]);
+    
+    useEffect(() => {
+        if (isEngineRunning) {
+            const periodicInterval = setInterval(async () => {
+                await setExchangeRate(await getExchangeRate());
+                
+                setFundamentalData(prev => {
+                    const newFundamentals = {...prev};
+                    for (const symbol in newFundamentals) {
+                        newFundamentals[symbol as StockSymbol] = getUpdatedFundamentalData(newFundamentals[symbol as StockSymbol]);
+                    }
+                    return newFundamentals;
+                });
+
+                const currentMarketRegime = detectMarketRegime(priceHistoryRef.current);
+                setMarketRegime(currentMarketRegime);
+                
+                const holdingsValue = Object.entries(portfolio.holdings).reduce((acc, [symbol, holding]) => {
+                    if (!holding) return acc;
+                    const stockInfo = STOCKS[symbol as StockSymbol];
+                    const price = currentPrices[symbol as StockSymbol] || 0;
+                    const valueInNative = holding.shares * price * (holding.positionType === PositionType.SHORT ? -1 : 1);
+                    return acc + (stockInfo.currency === Currency.USD ? valueInNative * exchangeRate : valueInNative);
+                }, 0);
+
+                const totalValue = portfolio.cash + holdingsValue;
+                const strategicDecision = await getStrategicAllocation(currentMarketRegime, totalValue, isAggressiveMode, isLowLatencyMode);
+                
+                setActiveStrategy(strategicDecision.strategy);
+                setStrategyReason(strategicDecision.reason);
+                
+                if (strategicDecision.strategy === HedgeFundStrategy.PAIRS_TRADING) {
+                    const history1 = priceHistoryRef.current[StockSymbol.MICRON];
+                    const history2 = priceHistoryRef.current[StockSymbol.HYNIX];
+                    const signal = getPairsTradingSignal(history1, history2);
+                    if (signal) {
+                        setPairsSignal(signal.reason);
+                        await processPairsTradeExecution(signal);
+                    } else {
+                        setPairsSignal("Pairs Arb: Monitoring spread, no signal.");
+                    }
+                } else {
+                    setPairsSignal(null);
+                }
+
+                setChartData(prevChartData => {
+                    const newChartData = { ...prevChartData };
+                    for (const symbolStr in STOCKS) {
+                        const symbol = symbolStr as StockSymbol;
+                        const lastTick = lastTickRef.current[symbol];
+                        if (lastTick) {
+                            const timeKey = new Date(Math.floor(Date.now() / AGGREGATION_INTERVAL) * AGGREGATION_INTERVAL).toLocaleTimeString([], { hour12: false });
+                             if (!candleAggregatorRef.current[symbol]) {
+                                candleAggregatorRef.current[symbol] = { open: lastTick.price, high: lastTick.price, low: lastTick.price, close: lastTick.price, time: timeKey };
+                             } else {
+                                const candle = candleAggregatorRef.current[symbol]!;
+                                candle.high = Math.max(candle.high, lastTick.price);
+                                candle.low = Math.min(candle.low, lastTick.price);
+                                candle.close = lastTick.price;
+
+                                if (candle.time !== timeKey) {
+                                    const dataSeries = newChartData[symbol];
+                                    if(dataSeries.length > 0 && dataSeries[dataSeries.length - 1].time !== candle.time) {
+                                        dataSeries.push(candle);
+                                        if(dataSeries.length > 100) dataSeries.shift();
+                                    } else if (dataSeries.length === 0) {
+                                        dataSeries.push(candle);
+                                    }
+                                    candleAggregatorRef.current[symbol] = { open: lastTick.price, high: lastTick.price, low: lastTick.price, close: lastTick.price, time: timeKey };
+                                }
+                             }
+                        }
+                    }
+                    return newChartData;
+                });
+
+            }, 5000);
+            return () => clearInterval(periodicInterval);
+        }
+    }, [isEngineRunning, portfolio, currentPrices, isAggressiveMode, isLowLatencyMode, exchangeRate, processPairsTradeExecution]);
+    
+     useEffect(() => {
         const stockSymbols = Object.keys(STOCKS) as StockSymbol[];
-        if (!chartData[stockSymbols[0]] || chartData[stockSymbols[0]].length === 0) return;
+        const firstSymbol = stockSymbols[0];
+        if (!chartData[firstSymbol] || chartData[firstSymbol].length === 0) return;
 
         const basePrices = stockSymbols.reduce((acc, symbol) => {
             acc[symbol] = chartData[symbol][0]?.close || 1;
             return acc;
         }, {} as { [key in StockSymbol]: number });
 
-        const combinedData: NormalizedChartDataPoint[] = chartData[stockSymbols[0]].map((_, index) => {
+        const combinedData: NormalizedChartDataPoint[] = chartData[firstSymbol].map((_, index) => {
             const dataPoint: NormalizedChartDataPoint = {
-                time: chartData[stockSymbols[0]][index]?.time,
+                time: chartData[firstSymbol][index]?.time,
             };
             stockSymbols.forEach(symbol => {
                 const currentPoint = chartData[symbol][index];
@@ -84,149 +486,10 @@ const Dashboard: React.FC = () => {
         setNormalizedChartData(combinedData);
     }, [chartData]);
     
-    const logActivity = (action: TradeAction, stock: Stock, shares: number, price: number, reason: string, time: string) => {
-        const newActivity: Activity = {
-            id: new Date().toISOString() + Math.random(),
-            timestamp: time,
-            action, stock, shares, price, reason, time,
-        };
-        setActivityLog(prev => [newActivity, ...prev.slice(0, 199)]);
-    };
-    
-    const calculateSlippage = (shares: number, price: number): number => {
-      const slippagePercent = Math.min(0.005, (shares / 1000) * 0.001);
-      return price * slippagePercent;
-    };
-
-    const runSimulationStep = useCallback(async () => {
-        setIsLoading(true);
-
-        const newIndex = currentDateIndex + 1;
-        if (newIndex >= historicalData[StockSymbol.SAMSUNG].length) {
-            setIsRunning(false);
-            setIsLoading(false);
-            return;
-        }
-        setCurrentDateIndex(newIndex);
-        const currentDateStr = historicalData[StockSymbol.SAMSUNG][newIndex].time;
-        setCurrentDate(currentDateStr);
-
-        const newChartData = {} as { [key in StockSymbol]: CandlestickDataPoint[] };
-        const currentPricesMap = {} as { [key in StockSymbol]: number };
-        const historyForAnalysis = {} as { [key in StockSymbol]: ChartDataPoint[] };
-        
-        for (const symbol in historicalData) {
-            const sym = symbol as StockSymbol;
-            const historySlice = historicalData[sym].slice(0, newIndex + 1);
-            newChartData[sym] = historySlice;
-            currentPricesMap[sym] = historySlice[historySlice.length - 1].close;
-            historyForAnalysis[sym] = historySlice.map(d => ({ time: d.time, price: d.close }));
-        }
-        
-        setChartData(newChartData);
-        
-        const currentExchangeRate = await getExchangeRate();
-        setExchangeRate(currentExchangeRate);
-
-        const updatedFactors: { [key in StockSymbol]?: AlphaFactors } = {};
-        const stockTrends: { [key in StockSymbol]?: Trend } = {};
-        
-        for (const stock of Object.values(STOCKS)) {
-            stockTrends[stock.symbol] = calculateTrend(historyForAnalysis[stock.symbol]);
-        }
-        
-        const currentMarketRegime = detectMarketRegime(historyForAnalysis);
-        setMarketRegime(currentMarketRegime);
-        
-        const holdingsValue = Object.entries(portfolio.holdings).reduce((acc, [symbol, holding]) => {
-            const stock = STOCKS[symbol as StockSymbol];
-            const price = currentPricesMap[symbol as StockSymbol];
-            let valueInNativeCurrency;
-            if (holding.positionType === PositionType.SHORT) {
-                valueInNativeCurrency = -(holding.shares * price);
-            } else {
-                valueInNativeCurrency = holding.shares * price;
-            }
-            const valueInKrw = stock.currency === Currency.USD ? valueInNativeCurrency * currentExchangeRate : valueInNativeCurrency;
-            return acc + valueInKrw;
-        }, 0);
-        const totalValue = portfolio.cash + holdingsValue;
-
-        const strategicDecision = await getStrategicAllocation(currentMarketRegime, totalValue);
-        setActiveStrategy(strategicDecision.strategy);
-        setStrategyReason(strategicDecision.reason);
-        
-        let tempPortfolio = JSON.parse(JSON.stringify(portfolio));
-        
-        if (strategicDecision.strategy === HedgeFundStrategy.DEEP_HEDGING) {
-            const currentMlSignals: { [key in StockSymbol]?: MlSignal } = {};
-            for (const stock of Object.values(STOCKS)) {
-                 if (!tempPortfolio.holdings[stock.symbol]?.pairSymbol) {
-                    const mlSignal = getMlSignal(historyForAnalysis[stock.symbol]);
-                    currentMlSignals[stock.symbol] = mlSignal;
-                    setCurrentAnalysis({ stock, factors: alphaFactors[stock.symbol], trend: stockTrends[stock.symbol]! });
-
-                    const reason = `ML(${mlSignal.action}): Conf. ${(mlSignal.confidence * 100).toFixed(0)}%, Pred. ${mlSignal.predictedPriceChangePercent.toFixed(2)}%`;
-                    const shares = mlSignal.action !== 'HOLD' ? Math.round((mlSignal.confidence * 10)) * 10 : 0;
-                    
-                    const tradeSignal: AITradeSignal = {
-                        decision: TradeAction[mlSignal.action],
-                        sharesToTrade: shares,
-                        reason: reason,
-                        confidence: mlSignal.confidence,
-                    };
-                    tempPortfolio = executeDirectionalTrade(tempPortfolio, stock, tradeSignal, currentPricesMap, currentExchangeRate, currentDateStr);
-                 }
-            }
-            setMlSignals(currentMlSignals);
-        } else {
-             // Reset ML signals when not in use
-            if(Object.keys(mlSignals).length > 0) setMlSignals({});
-
-            for (const stock of Object.values(STOCKS)) {
-                updatedFactors[stock.symbol] = getUpdatedAlphaFactors(alphaFactors[stock.symbol], historyForAnalysis[stock.symbol], strategicDecision.strategy);
-            }
-            setAlphaFactors(prev => ({...prev, ...updatedFactors}));
-
-            const activePairsSignal = getPairsTradingSignal(historyForAnalysis[StockSymbol.MICRON], historyForAnalysis[StockSymbol.HYNIX]);
-            setPairsSignal(activePairsSignal ? activePairsSignal.reason.split(':')[1].trim() : null);
-
-            if (strategicDecision.strategy === HedgeFundStrategy.PAIRS_TRADING) {
-                if (activePairsSignal?.action === 'ENTER_PAIR_TRADE' && !tempPortfolio.pairTrades['MU-HYNIX']) {
-                    tempPortfolio = executePairTrade(tempPortfolio, activePairsSignal, currentPricesMap, currentExchangeRate, currentDateStr);
-                } else if (activePairsSignal?.action === 'EXIT_PAIR_TRADE' && tempPortfolio.pairTrades['MU-HYNIX']) {
-                    tempPortfolio = exitPairTrade(tempPortfolio, 'MU-HYNIX', currentPricesMap, currentExchangeRate, currentDateStr);
-                }
-            }
-            else if (strategicDecision.strategy === HedgeFundStrategy.ALPHA_MOMENTUM || strategicDecision.strategy === HedgeFundStrategy.MEAN_REVERSION) {
-                for (const stock of Object.values(STOCKS)) {
-                    if (!tempPortfolio.holdings[stock.symbol]?.pairSymbol) {
-                        setCurrentAnalysis({ stock, factors: updatedFactors[stock.symbol]!, trend: stockTrends[stock.symbol]! });
-                        const analystSignal = await getAiTradeSignal(stock, strategicDecision.strategy, updatedFactors[stock.symbol]!, stockTrends[stock.symbol]!);
-                        tempPortfolio = executeDirectionalTrade(tempPortfolio, stock, analystSignal, currentPricesMap, currentExchangeRate, currentDateStr);
-                    }
-                }
-            } else if (strategicDecision.strategy === HedgeFundStrategy.RISK_OFF) {
-                for (const stock of Object.values(STOCKS)) {
-                    if (tempPortfolio.holdings[stock.symbol] && !tempPortfolio.holdings[stock.symbol]?.pairSymbol) {
-                        tempPortfolio = liquidatePosition(tempPortfolio, stock, currentPricesMap, currentExchangeRate, currentDateStr, "RISK_OFF: 포지션 청산");
-                    }
-                }
-                for (const pairId of Object.keys(tempPortfolio.pairTrades)) {
-                    tempPortfolio = exitPairTrade(tempPortfolio, pairId, currentPricesMap, currentExchangeRate, currentDateStr);
-                }
-            }
-        }
-        
-        setPortfolio(tempPortfolio);
-        setIsLoading(false);
-
-    }, [currentDateIndex, portfolio, alphaFactors, mlSignals]);
-
     const calculateTrend = (history: ChartDataPoint[]): Trend => {
         if (history.length < 20) return 'NEUTRAL';
-        const ma5 = calculateSMA(history, 5);
-        const ma20 = calculateSMA(history, 20);
+        const ma5 = calculateSMA(history.slice(-20), 5);
+        const ma20 = calculateSMA(history.slice(-20), 20);
         if (ma5 && ma20) {
             if (ma5 > ma20 * 1.001) return 'UPTREND';
             if (ma5 < ma20 * 0.999) return 'DOWNTREND';
@@ -234,168 +497,22 @@ const Dashboard: React.FC = () => {
         return 'NEUTRAL';
     };
     
-    const executeDirectionalTrade = (p: Portfolio, stock: Stock, signal: AITradeSignal, prices: { [k in StockSymbol]: number }, exRate: number, time: string): Portfolio => {
-        const { decision, sharesToTrade, reason } = signal;
-        if (decision === TradeAction.HOLD || sharesToTrade === 0) return p;
-
-        const currentPrice = prices[stock.symbol];
-        const slippage = calculateSlippage(sharesToTrade, currentPrice);
-        const holding = p.holdings[stock.symbol];
-
-        const execute = (action: TradeAction, effectivePrice: number) => {
-            const costInNative = sharesToTrade * effectivePrice;
-            const costInKrw = stock.currency === Currency.USD ? costInNative * exRate : costInNative;
-
-            if (action === TradeAction.BUY) {
-                if (p.cash < costInKrw) { logActivity(action, stock, 0, currentPrice, "자금 부족", time); return p; }
-                const newTotalShares = (holding?.shares || 0) + sharesToTrade;
-                const newTotalCost = ((holding?.shares || 0) * (holding?.avgPrice || 0)) + costInNative;
-                p.holdings[stock.symbol] = { shares: newTotalShares, avgPrice: newTotalCost / newTotalShares, positionType: PositionType.LONG };
-                p.cash -= costInKrw;
-            } else if (action === TradeAction.SELL) {
-                if (!holding || holding.shares < sharesToTrade) { logActivity(action, stock, 0, currentPrice, "수량 부족", time); return p; }
-                holding.shares -= sharesToTrade;
-                if (holding.shares === 0) delete p.holdings[stock.symbol];
-                p.cash += costInKrw;
-            } else if (action === TradeAction.SHORT) {
-                 if (holding) { logActivity(action, stock, 0, currentPrice, "포지션 보유중", time); return p; }
-                 p.holdings[stock.symbol] = { shares: sharesToTrade, avgPrice: effectivePrice, positionType: PositionType.SHORT };
-                 p.cash += costInKrw;
-            } else if (action === TradeAction.COVER) {
-                 if (!holding || holding.positionType !== PositionType.SHORT || holding.shares < sharesToTrade) { logActivity(action, stock, 0, currentPrice, "포지션 없음", time); return p; }
-                 if (p.cash < costInKrw) { logActivity(action, stock, 0, currentPrice, "자금 부족", time); return p; }
-                 holding.shares -= sharesToTrade;
-                 if (holding.shares === 0) delete p.holdings[stock.symbol];
-                 p.cash -= costInKrw;
-            }
-            logActivity(action, stock, sharesToTrade, currentPrice, reason, time);
-            return p;
-        }
-
-        switch(decision) {
-            case TradeAction.BUY: return execute(TradeAction.BUY, currentPrice + slippage);
-            case TradeAction.SELL: return execute(TradeAction.SELL, currentPrice - slippage);
-            case TradeAction.SHORT: return execute(TradeAction.SHORT, currentPrice - slippage);
-            case TradeAction.COVER: return execute(TradeAction.COVER, currentPrice + slippage);
-            default: return p;
-        }
-    };
-    
-    const liquidatePosition = (p: Portfolio, stock: Stock, prices: { [k in StockSymbol]: number }, exRate: number, time: string, reason: string): Portfolio => {
-        const holding = p.holdings[stock.symbol];
-        if (!holding) return p;
-        
-        const currentPrice = prices[stock.symbol];
-        const slippage = calculateSlippage(holding.shares, currentPrice);
-        const action = holding.positionType === PositionType.LONG ? TradeAction.SELL : TradeAction.COVER;
-        const effectivePrice = action === TradeAction.SELL ? currentPrice - slippage : currentPrice + slippage;
-        const valueInNative = holding.shares * effectivePrice;
-        const valueInKrw = stock.currency === Currency.USD ? valueInNative * exRate : valueInNative;
-        
-        if (action === TradeAction.COVER && p.cash < valueInKrw) { logActivity(action, stock, 0, currentPrice, "자금 부족", time); return p; }
-        
-        if (action === TradeAction.SELL) p.cash += valueInKrw;
-        else p.cash -= valueInKrw;
-
-        logActivity(action, stock, holding.shares, currentPrice, reason, time);
-        delete p.holdings[stock.symbol];
-        return p;
-    };
-
-    const executePairTrade = (p: Portfolio, signal: PairsTradingSignal, prices: { [k in StockSymbol]: number }, exRate: number, time: string): Portfolio => {
-        const { longStock: longSymbol, shortStock: shortSymbol, reason } = signal;
-        const longStock = STOCKS[longSymbol];
-        const shortStock = STOCKS[shortSymbol];
-        
-        const shares = 10;
-        const longPrice = prices[longSymbol];
-        const shortPrice = prices[shortSymbol];
-
-        const longSlippage = calculateSlippage(shares, longPrice);
-        const shortSlippage = calculateSlippage(shares, shortPrice);
-
-        const longCostNative = shares * (longPrice + longSlippage);
-        const shortProceedsNative = shares * (shortPrice - shortSlippage);
-        const longCostKrw = longStock.currency === Currency.USD ? longCostNative * exRate : longCostNative;
-
-        if(p.cash < longCostKrw) { logActivity(TradeAction.ENTER_PAIR_TRADE, longStock, 0, 0, "자금 부족", time); return p; }
-        p.cash -= longCostKrw;
-        const shortProceedsKrw = shortStock.currency === Currency.USD ? shortProceedsNative * exRate : shortProceedsNative;
-        p.cash += shortProceedsKrw;
-
-        const pairId = `${shortSymbol}-${longSymbol}`;
-        p.pairTrades[pairId] = { id: pairId, longStock: longSymbol, shortStock: shortSymbol, shares, entryPriceLong: longPrice, entryPriceShort: shortPrice, entrySpread: prices[shortSymbol] / prices[longSymbol], entryTime: time };
-        p.holdings[longSymbol] = { shares, avgPrice: longPrice, positionType: PositionType.LONG, pairSymbol: shortSymbol };
-        p.holdings[shortSymbol] = { shares, avgPrice: shortPrice, positionType: PositionType.SHORT, pairSymbol: longSymbol };
-        
-        logActivity(TradeAction.ENTER_PAIR_TRADE, STOCKS[longSymbol], shares, longPrice, reason, time);
-        return p;
-    }
-    const exitPairTrade = (p: Portfolio, pairId: string, prices: { [k in StockSymbol]: number }, exRate: number, time: string): Portfolio => {
-        const pair = p.pairTrades[pairId];
-        if (!pair) return p;
-
-        const { longStock: longSymbol, shortStock: shortSymbol, shares } = pair;
-        const longStock = STOCKS[longSymbol];
-        const shortStock = STOCKS[shortSymbol];
-        
-        const longPrice = prices[longSymbol];
-        const shortPrice = prices[shortSymbol];
-        const longSlippage = calculateSlippage(shares, longPrice);
-        const shortSlippage = calculateSlippage(shares, shortPrice);
-
-        const longProceedsNative = shares * (longPrice - longSlippage);
-        const shortCostNative = shares * (shortPrice + shortSlippage);
-        
-        const longProceedsKrw = longStock.currency === Currency.USD ? longProceedsNative * exRate : longProceedsNative;
-        const shortCostKrw = shortStock.currency === Currency.USD ? shortCostNative * exRate : shortCostNative;
-        
-        if(p.cash + longProceedsKrw < shortCostKrw) { logActivity(TradeAction.EXIT_PAIR_TRADE, longStock, 0, 0, "자금 부족", time); return p; }
-        
-        p.cash += longProceedsKrw;
-        p.cash -= shortCostKrw;
-
-        delete p.holdings[longSymbol];
-        delete p.holdings[shortSymbol];
-        delete p.pairTrades[pairId];
-        
-        logActivity(TradeAction.EXIT_PAIR_TRADE, STOCKS[longSymbol], shares, longPrice, "페어 트레이드 청산", time);
-        return p;
-    }
-
-
-    useEffect(() => {
-        if (isRunning) {
-            const intervalTime = isHftMode ? 150 : 1500;
-            const interval = setInterval(runSimulationStep, intervalTime); 
-            return () => clearInterval(interval);
-        }
-    }, [isRunning, runSimulationStep, isHftMode]);
-    
-    const toggleSimulation = () => setIsRunning(!isRunning);
-    const toggleHftMode = () => {
-        if (!isRunning) {
-            setIsHftMode(!isHftMode);
-        }
-    };
-
-    const currentPrices = (Object.keys(STOCKS) as StockSymbol[]).reduce((acc, symbol) => {
-        const data = chartData[symbol];
-        acc[symbol] = data && data.length > 0 ? data[data.length - 1].close : 0;
-        return acc;
-    }, {} as { [key in StockSymbol]: number });
+    const toggleEngine = () => setIsEngineRunning(!isEngineRunning);
+    const toggleAggressiveMode = () => setIsAggressiveMode(!isAggressiveMode);
+    const toggleLowLatencyMode = () => setIsLowLatencyMode(!isLowLatencyMode);
 
     return (
         <div className="space-y-6">
             <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
                 <div className="lg:col-span-4 flex flex-col gap-6">
                     <ControlPanel 
-                        isRunning={isRunning}
-                        isLoading={isLoading}
-                        isHftMode={isHftMode}
-                        onToggleSimulation={toggleSimulation}
-                        onToggleHftMode={toggleHftMode}
-                        currentDate={currentDate}
+                        isEngineRunning={isEngineRunning}
+                        onToggleEngine={toggleEngine}
+                        isAggressiveMode={isAggressiveMode}
+                        onToggleAggressiveMode={toggleAggressiveMode}
+                        isLowLatencyMode={isLowLatencyMode}
+                        onToggleLowLatencyMode={toggleLowLatencyMode}
+                        liveTime={liveTime}
                         marketRegime={marketRegime}
                         activeStrategy={activeStrategy}
                         strategyReason={strategyReason}
@@ -409,13 +526,14 @@ const Dashboard: React.FC = () => {
                         currentPrices={currentPrices}
                         exchangeRate={exchangeRate}
                     />
+                    <VirtualBank balance={bankBalance} transactions={bankTransactions} />
                      <AiAnalysisFactors 
                       analysis={currentAnalysis} 
                       activeStrategy={activeStrategy}
                       pairsSignal={pairsSignal}
                       mlSignal={currentAnalysis ? mlSignals[currentAnalysis.stock.symbol] || null : null}
                     />
-                    <ActivityLog activities={activityLog} isLoading={isLoading} />
+                    <ActivityLog activities={activityLog} isLoading={false} />
                 </div>
             </div>
             <IndividualCharts allChartData={chartData} activities={activityLog} />

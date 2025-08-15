@@ -44,7 +44,7 @@ const Header: React.FC = () => {
           <ChipIcon />
           <div>
              <h1 className="text-xl font-bold text-gray-900 dark:text-white tracking-tight">AI 글로벌 주식 자동매매</h1>
-             <p className="text-xs text-gray-500 dark:text-gray-400">Fundamental &amp; Sentiment Analysis Engine</p>
+             <p className="text-xs text-gray-500 dark:text-gray-400">Live Automated Trading Engine</p>
           </div>
         </div>
         <ThemeToggle />

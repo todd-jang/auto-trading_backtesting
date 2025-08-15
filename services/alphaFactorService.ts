@@ -1,3 +1,4 @@
+
 import { StockSymbol, AlphaFactors, ChartDataPoint, HedgeFundStrategy } from '../types';
 
 const initialFactors: { [key in StockSymbol]: AlphaFactors } = {
@@ -6,6 +7,7 @@ const initialFactors: { [key in StockSymbol]: AlphaFactors } = {
   [StockSymbol.NVIDIA]: { value: 90, momentum: 50, meanReversion: 50, compositeAlphaScore: 0 },
   [StockSymbol.TSMC]: { value: 85, momentum: 50, meanReversion: 50, compositeAlphaScore: 0 },
   [StockSymbol.MICRON]: { value: 65, momentum: 50, meanReversion: 50, compositeAlphaScore: 0 },
+  [StockSymbol.CXMT]: { value: 60, momentum: 50, meanReversion: 50, compositeAlphaScore: 0 },
 };
 
 export const initializeAlphaFactors = (): { [key in StockSymbol]: AlphaFactors } => {

@@ -1,109 +1,55 @@
-import { ChartDataPoint, MlSignal } from '../types';
+import { ChartDataPoint, MlFeatures } from '../types';
 
-// Let TypeScript know that 'tf' is a global variable from the CDN script
-declare var tf: any;
+// This service acts as the "Data API", preparing raw price data into structured features for the ML inference model.
 
-let model: any | null = null; // tf.Sequential
+const calculateRSI = (data: ChartDataPoint[], period = 14): number => {
+    if (data.length < period + 1) return 50; // Neutral RSI if not enough data
+    const changes = data.slice(1).map((p, i) => p.price - data[i].price);
+    const recentChanges = changes.slice(-period);
 
-/**
- * Initializes a more realistic placeholder TensorFlow.js model with an LSTM layer.
- */
-export const initializeModel = async () => {
-    if (typeof tf === 'undefined') {
-        console.error("TensorFlow.js not loaded. Make sure the script is in index.html.");
-        return;
-    }
-    
-    if (model) {
-        console.log("TF.js model already initialized.");
-        return;
-    }
+    const gains = recentChanges.filter(c => c > 0).reduce((acc, c) => acc + c, 0);
+    const losses = recentChanges.filter(c => c < 0).reduce((acc, c) => acc + Math.abs(c), 0);
 
-    console.log("Initializing TF.js LSTM model...");
-    // Define a simple sequential model for demonstration
-    model = tf.sequential();
-    // Adding an LSTM layer suitable for time-series data
-    model.add(tf.layers.lstm({units: 16, inputShape: [10, 1], returnSequences: false})); // Input: e.g., last 10 prices (timesteps, features)
-    model.add(tf.layers.dense({units: 8, activation: 'relu'}));
-    model.add(tf.layers.dense({units: 3, activation: 'softmax'})); // Output: Probabilities for BUY, SELL, HOLD
-    
-    model.compile({loss: 'categoricalCrossentropy', optimizer: 'adam'});
-    
-    console.log("TF.js LSTM model initialized (placeholder).");
-    model.summary();
+    if (losses === 0) return 100; // All gains, max RSI
+    if (gains === 0) return 0; // All losses, min RSI
+
+    const avgGain = gains / period;
+    const avgLoss = losses / period;
+    const rs = avgGain / avgLoss;
+    return 100 - (100 / (1 + rs));
 };
 
-const calculateVolatility = (data: number[]): number => {
-    const n = data.length;
+const calculateVolatility = (prices: number[]): number => {
+    const n = prices.length;
     if (n < 2) return 0;
-    const mean = data.reduce((a, b) => a + b) / n;
-    const variance = data.map(x => Math.pow(x - mean, 2)).reduce((a, b) => a + b) / (n - 1);
+    const mean = prices.reduce((a, b) => a + b) / n;
+    const variance = prices.map(x => Math.pow(x - mean, 2)).reduce((a, b) => a + b) / (n - 1);
     return Math.sqrt(variance);
 };
 
-
-/**
- * Gets a prediction from the ML model.
- * This is a placeholder that simulates a prediction. A real implementation
- * would preprocess the input data into a tensor and feed it to the model.
- * @param data - The historical chart data for a stock.
- * @returns An MlSignal object with a predicted action, confidence, and feature importance.
- */
-export const getMlSignal = (data: ChartDataPoint[]): MlSignal => {
-    const LOOK_BACK_PERIOD = 20;
-    if (!model || data.length < LOOK_BACK_PERIOD) {
-        return { 
-            action: 'HOLD', 
-            confidence: 0, 
-            predictedPriceChangePercent: 0,
-            featureImportance: { Volatility: 0.5, Momentum: 0.5 }
+export const extractFeaturesFromData = (data: ChartDataPoint[]): MlFeatures => {
+    if (data.length < 21) {
+        // Return neutral/default features if not enough data
+        return {
+            priceChange5m: 0,
+            priceChange20m: 0,
+            volatility10m: 0,
+            rsi14m: 50,
         };
     }
-    
-    // --- This is a mock prediction ---
-    // In a real scenario, you would normalize data and use model.predict()
-    
-    const recentData = data.slice(-LOOK_BACK_PERIOD);
-    const prices = recentData.map(p => p.price);
+
+    const prices = data.map(p => p.price);
     const latestPrice = prices[prices.length - 1];
+
+    const price5m = prices[prices.length - 6];
+    const price20m = prices[prices.length - 21];
     
-    // 1. Simulate feature extraction
-    const momentum = (latestPrice - prices[0]) / prices[0]; // Simple momentum over the period
-    const volatility = calculateVolatility(prices.slice(-10)) / latestPrice; // Volatility of last 10 periods
-    
-    // 2. Simulate model prediction based on extracted features
-    let predictedChange = 0;
-    // Simple logic: if momentum is strong, predict it continues. If volatility is high, predict mean reversion.
-    if (volatility > 0.015) { // High volatility
-      predictedChange = -momentum * 0.1; // Predict reversion
-    } else { // Low volatility
-      predictedChange = momentum * 0.3; // Predict trend continuation
-    }
-
-    // Add some noise
-    predictedChange += (Math.random() - 0.5) * 0.005;
-
-    // 3. Determine action and confidence
-    const confidence = Math.random() * 0.4 + 0.55; // Confidence between 0.55 and 0.95
-    let action: 'BUY' | 'SELL' | 'HOLD' = 'HOLD';
-
-    if (predictedChange > 0.001) {
-        action = 'BUY';
-    } else if (predictedChange < -0.001) {
-        action = 'SELL';
-    }
-
-    // 4. Mock feature importance
-    const totalFactor = Math.abs(momentum) + volatility;
-    const featureImportance = {
-        Momentum: totalFactor > 0 ? Math.abs(momentum) / totalFactor : 0.5,
-        Volatility: totalFactor > 0 ? volatility / totalFactor : 0.5,
-    };
+    const volatility = calculateVolatility(prices.slice(-10));
 
     return {
-        action,
-        confidence,
-        predictedPriceChangePercent: predictedChange * 100,
-        featureImportance
+        priceChange5m: ((latestPrice - price5m) / price5m) * 100,
+        priceChange20m: ((latestPrice - price20m) / price20m) * 100,
+        volatility10m: (volatility / latestPrice) * 100,
+        rsi14m: calculateRSI(data),
     };
 };
