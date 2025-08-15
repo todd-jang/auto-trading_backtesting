@@ -6,6 +6,7 @@ interface AiAnalysisFactorsProps {
   activeStrategy: HedgeFundStrategy;
   pairsSignal: string | null;
   mlSignal: AITradeSignal | null;
+  analystSignal: AITradeSignal | null;
 }
 
 const FactorBar: React.FC<{ label: string, value: number, color: string, darkColor: string }> = ({ label, value, color, darkColor }) => (
@@ -89,8 +90,103 @@ const MlAnalysisView: React.FC<{ mlSignal: AITradeSignal }> = ({ mlSignal }) => 
     );
 };
 
+const JocodingMAView: React.FC<{ analysis: AnalysisFocus }> = ({ analysis }) => {
+    const { shortMA, longMA } = analysis;
+    if (shortMA === undefined || longMA === undefined) {
+        return <p className="text-center text-gray-400">Calculating MAs...</p>;
+    }
 
-const AiAnalysisFactors: React.FC<AiAnalysisFactorsProps> = ({ analysis, activeStrategy, pairsSignal, mlSignal }) => {
+    const isGolden = shortMA > longMA;
+    const diff = Math.abs(shortMA - longMA);
+    const diffPercent = longMA > 0 ? (diff / longMA) * 100 : 0;
+    
+    let statusText = '교차점 모니터링';
+    let statusColor = 'text-gray-500 dark:text-gray-400';
+    if(diffPercent < 0.2) {
+        statusText = '교차 임박!';
+        statusColor = 'text-amber-500 dark:text-amber-400';
+    } else if (isGolden) {
+        statusText = '강세 (골든 크로스)';
+        statusColor = 'text-green-500 dark:text-green-400';
+    } else {
+        statusText = '약세 (데드 크로스)';
+        statusColor = 'text-red-500 dark:text-red-400';
+    }
+
+    return (
+        <div className="space-y-4 animate-fade-in">
+            <div className="text-center p-3 bg-gray-100 dark:bg-gray-700/50 rounded-lg">
+                <h4 className="text-sm font-semibold text-gray-500 dark:text-gray-400 mb-1">이동평균선 상태</h4>
+                <p className={`text-lg font-bold ${statusColor}`}>{statusText}</p>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+                <div className={`p-3 rounded-lg text-center border-2 ${isGolden ? 'border-green-500 bg-green-500/10' : 'border-gray-300 dark:border-gray-600'}`}>
+                    <div className="text-xs text-gray-500 dark:text-gray-400">5일 단기 MA</div>
+                    <div className="text-xl font-bold text-gray-800 dark:text-gray-100">{shortMA.toFixed(2)}</div>
+                </div>
+                 <div className={`p-3 rounded-lg text-center border-2 ${!isGolden ? 'border-red-500 bg-red-500/10' : 'border-gray-300 dark:border-gray-600'}`}>
+                    <div className="text-xs text-gray-500 dark:text-gray-400">20일 장기 MA</div>
+                    <div className="text-xl font-bold text-gray-800 dark:text-gray-100">{longMA.toFixed(2)}</div>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+const AnalystJudgement: React.FC<{ signal: AITradeSignal }> = ({ signal }) => {
+    const { decision, reason, confidence } = signal;
+
+    const decisionStyles = {
+        [TradeAction.BUY]: { text: '매수', color: 'text-green-500 dark:text-green-400', bg: 'bg-green-500' },
+        [TradeAction.SELL]: { text: '매도', color: 'text-red-500 dark:text-red-400', bg: 'bg-red-500' },
+        [TradeAction.SHORT]: { text: '공매도', color: 'text-red-600 dark:text-red-500', bg: 'bg-red-600' },
+        [TradeAction.COVER]: { text: '커버', color: 'text-sky-500 dark:text-sky-400', bg: 'bg-sky-500' },
+        [TradeAction.HOLD]: { text: '보류', color: 'text-gray-500 dark:text-gray-400', bg: 'bg-gray-500' },
+    };
+    const style = decisionStyles[decision] || decisionStyles[TradeAction.HOLD];
+
+    return (
+        <div className="space-y-3 animate-fade-in">
+            <div className="grid grid-cols-2 gap-2 text-center">
+                <div className="bg-gray-100 dark:bg-gray-700/50 p-2 rounded-lg">
+                    <div className="text-xs text-gray-500 dark:text-gray-400">최종 결정</div>
+                    <div className={`text-lg font-bold ${style.color}`}>{style.text}</div>
+                </div>
+                <div className="bg-gray-100 dark:bg-gray-700/50 p-2 rounded-lg">
+                    <div className="text-xs text-gray-500 dark:text-gray-400">신뢰도</div>
+                    <div className="text-lg font-bold text-cyan-600 dark:text-cyan-400">{(confidence * 100).toFixed(1)}%</div>
+                </div>
+            </div>
+            <div>
+                 <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2.5">
+                    <div className={`bg-cyan-500 h-2.5 rounded-full`} style={{ width: `${confidence * 100}%` }}></div>
+                </div>
+            </div>
+             <div className="bg-gray-100 dark:bg-gray-900/50 p-3 rounded-md border-l-4 border-gray-300 dark:border-gray-600">
+                <p className="text-xs text-gray-500 dark:text-gray-400 italic">핵심 사유:</p>
+                <p className="text-sm text-gray-800 dark:text-gray-200">{reason}</p>
+            </div>
+        </div>
+    );
+};
+
+const AiAnalysisFactors: React.FC<AiAnalysisFactorsProps> = ({ analysis, activeStrategy, pairsSignal, mlSignal, analystSignal }) => {
+
+  const isGeneralAnalysis = (activeStrategy === HedgeFundStrategy.ALPHA_MOMENTUM || activeStrategy === HedgeFundStrategy.MEAN_REVERSION);
+  
+  if (activeStrategy === HedgeFundStrategy.RISK_OFF) {
+    return (
+        <div className="bg-white dark:bg-gray-800/50 rounded-lg shadow-md dark:shadow-lg p-4">
+          <h2 className="text-xl font-bold text-gray-900 dark:text-white mb-4 border-b border-gray-200 dark:border-gray-700 pb-2">AI 분석 모델</h2>
+          <div className="text-center p-4 bg-yellow-100 dark:bg-yellow-900/30 border border-yellow-300 dark:border-yellow-700 rounded-lg animate-fade-in flex flex-col justify-center min-h-[200px]">
+              <h4 className="text-lg font-bold text-yellow-800 dark:text-yellow-300 mb-2">전략: 리스크 오프 (현금 보유)</h4>
+              <p className="text-sm text-yellow-700 dark:text-yellow-400 font-medium">
+                  AI CIO가 시장 변동성이 높다고 판단하여, 신규 포지션 진입을 중단하고 현금 보유를 권고합니다.
+              </p>
+          </div>
+        </div>
+    );
+  }
 
   return (
     <div className="bg-white dark:bg-gray-800/50 rounded-lg shadow-md dark:shadow-lg p-4">
@@ -108,7 +204,9 @@ const AiAnalysisFactors: React.FC<AiAnalysisFactorsProps> = ({ analysis, activeS
                     <span className="font-bold text-lg text-amber-600 dark:text-amber-400">{analysis.stock.koreanName}</span>
                 </div>
 
-                {activeStrategy === HedgeFundStrategy.PAIRS_TRADING ? (
+                {activeStrategy === HedgeFundStrategy.JOCODING_MA_CROSS ? (
+                    <JocodingMAView analysis={analysis} />
+                ) : activeStrategy === HedgeFundStrategy.PAIRS_TRADING ? (
                     <div className="text-center p-4 bg-gray-100 dark:bg-gray-700/50 rounded-lg animate-fade-in flex flex-col justify-center min-h-[150px]">
                         <h4 className="text-sm font-semibold text-gray-500 dark:text-gray-400 mb-2">Statistical Arbitrage Signal</h4>
                         <p className="text-md text-amber-600 dark:text-amber-400 font-medium">{pairsSignal || 'Awaiting signal...'}</p>
@@ -139,6 +237,23 @@ const AiAnalysisFactors: React.FC<AiAnalysisFactorsProps> = ({ analysis, activeS
                                 <FactorBar label="Mean Reversion" value={analysis.factors.meanReversion} color="text-pink-500" darkColor="dark:text-pink-400" />
                             </div>
                         </div>
+
+                        {isGeneralAnalysis && (
+                            <div className="border-t-2 border-dashed border-gray-200 dark:border-gray-600 pt-3 mt-3">
+                                <h4 className="text-sm font-semibold text-center text-gray-500 dark:text-gray-400 mb-2">AI 최종 판단</h4>
+                                {!analystSignal ? (
+                                    <div className="flex items-center justify-center p-4 text-gray-500 dark:text-gray-400">
+                                        <svg className="animate-spin -ml-1 mr-3 h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                        </svg>
+                                        <span>분석 중...</span>
+                                    </div>
+                                ) : (
+                                    <AnalystJudgement signal={analystSignal} />
+                                )}
+                            </div>
+                        )}
                     </div>
                 )}
             </>

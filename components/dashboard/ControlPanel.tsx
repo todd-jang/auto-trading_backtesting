@@ -12,24 +12,41 @@ interface ControlPanelProps {
     marketRegime: MarketRegime;
     activeStrategy: HedgeFundStrategy;
     strategyReason: string;
+    marketStatuses: { [market: string]: 'OPEN' | 'CLOSED' };
 }
 
-const ControlPanel: React.FC<ControlPanelProps> = ({ isEngineRunning, onToggleEngine, isAggressiveMode, onToggleAggressiveMode, isLowLatencyMode, onToggleLowLatencyMode, liveTime, marketRegime, activeStrategy, strategyReason }) => {
+const MarketStatusIndicator: React.FC<{ market: string, status: 'OPEN' | 'CLOSED' }> = ({ market, status }) => {
+    const isOpen = status === 'OPEN';
+    return (
+        <div className="flex items-center justify-center">
+            <span className="relative flex h-2 w-2 mr-1.5">
+                {isOpen && <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>}
+                <span className={`relative inline-flex rounded-full h-2 w-2 ${isOpen ? 'bg-green-500' : 'bg-red-500'}`}></span>
+            </span>
+            <span className="text-xs text-gray-500 dark:text-gray-400 mr-1">{market}:</span>
+            <span className={`text-xs font-bold ${isOpen ? 'text-green-500' : 'text-red-500'}`}>{status}</span>
+        </div>
+    )
+}
+
+const ControlPanel: React.FC<ControlPanelProps> = ({ isEngineRunning, onToggleEngine, isAggressiveMode, onToggleAggressiveMode, isLowLatencyMode, onToggleLowLatencyMode, liveTime, marketRegime, activeStrategy, strategyReason, marketStatuses }) => {
 
     return (
         <div className="bg-white dark:bg-gray-800/50 rounded-lg shadow-md dark:shadow-lg p-4 flex flex-col gap-4">
             <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
-                <div className="grid grid-cols-3 gap-4 text-center flex-1">
+                <div className="grid grid-cols-3 sm:grid-cols-5 gap-4 text-center flex-1">
                      <div>
                         <div className="text-xs text-gray-500 dark:text-gray-400 flex items-center justify-center">
                             <span className="relative flex h-2 w-2 mr-1.5">
                               <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${isEngineRunning ? 'bg-green-400' : 'bg-red-400'}`}></span>
                               <span className={`relative inline-flex rounded-full h-2 w-2 ${isEngineRunning ? 'bg-green-500' : 'bg-red-500'}`}></span>
                             </span>
-                            MARKET TIME
+                            시스템 시간
                         </div>
-                        <div className="text-sm font-bold text-gray-900 dark:text-white">{liveTime.toLocaleTimeString()}</div>
+                        <div className="text-sm font-bold text-gray-900 dark:text-white">{liveTime.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false})}</div>
                     </div>
+                    <MarketStatusIndicator market="KOREA" status={marketStatuses.KOREA} />
+                    <MarketStatusIndicator market="USA" status={marketStatuses.USA} />
                      <div>
                         <div className="text-xs text-gray-500 dark:text-gray-400">MARKET REGIME</div>
                         <div className="text-sm font-bold text-amber-500 dark:text-amber-400">{marketRegime}</div>

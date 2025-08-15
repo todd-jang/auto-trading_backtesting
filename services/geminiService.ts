@@ -1,5 +1,5 @@
 import { GoogleGenAI, Type } from "@google/genai";
-import { Stock, ChartDataPoint, Portfolio, TradeAction, Currency, AlphaFactors, Trend, HedgeFundStrategy, MarketRegime, FundamentalData, AITradeSignal, MlFeatures } from '../types';
+import { Stock, ChartDataPoint, Portfolio, TradeAction, Currency, AlphaFactors, Trend, HedgeFundStrategy, MarketRegime, FundamentalData, AITradeSignal, MlFeatures, StockSymbol } from '../types';
 
 if (!process.env.API_KEY) {
   console.error("API_KEY environment variable not set.");
@@ -21,6 +21,7 @@ const cioResponseSchema = {
                 HedgeFundStrategy.MEAN_REVERSION,
                 HedgeFundStrategy.RISK_OFF,
                 HedgeFundStrategy.DEEP_HEDGING,
+                HedgeFundStrategy.JOCODING_MA_CROSS,
             ],
         },
         reason: {
@@ -49,6 +50,7 @@ export const getStrategicAllocation = async (
         - "${HedgeFundStrategy.PAIRS_TRADING}": Best for RANGING or LOW_VOLATILITY markets. A market-neutral strategy focusing on statistical arbitrage opportunities.
         - "${HedgeFundStrategy.MEAN_REVERSION}": Best for RANGING markets. Aims to buy oversold assets and sell overbought ones.
         - "${HedgeFundStrategy.DEEP_HEDGING}": An advanced strategy using a Machine Learning model for predictive signals. Best for RANGING or highly volatile markets where traditional factors are unreliable.
+        - "${HedgeFundStrategy.JOCODING_MA_CROSS}": A classic rule-based strategy. Best for clearly TRENDING markets. It buys on a "Golden Cross" (short MA crosses above long MA) and sells on a "Dead Cross". Simple and fast, but can be whipsawed in RANGING markets.
         - "${HedgeFundStrategy.RISK_OFF}": The safest option. Use in volatile or uncertain conditions. Liquidates positions and holds cash.
 
         Current Market Analysis:
@@ -117,6 +119,49 @@ export const getAiTradeSignal = async (
     isLowLatencyMode: boolean,
 ): Promise<AITradeSignal> => {
      const maxShares = isAggressiveMode ? 200 : 100;
+     let sectorContextPrompt = '';
+     const stockSymbol = stock.symbol;
+
+     if ([StockSymbol.SAMSUNG, StockSymbol.HYNIX, StockSymbol.MICRON, StockSymbol.CXMT].includes(stockSymbol)) {
+         sectorContextPrompt += `
+        **Sector-Specific Context (Memory Market):**
+        This stock operates in the highly competitive memory semiconductor market. When forming your judgment, consider its standing relative to its peers. Use the following expert-assessed weights to guide your reasoning on the stock's market influence and potential.
+
+        **1. High-Bandwidth Memory (HBM) - Crucial for AI accelerators:**
+        - SK Hynix: 70% (Current market leader, strong NVIDIA partnership)
+        - Micron: 20% (Rapidly emerging player, gaining traction)
+        - Samsung: 10% (Major challenger, aiming to increase share)
+
+        **2. General-Purpose Memory (DRAM/NAND):**
+        - SK Hynix: 40% (Strong #2 position, technology leader)
+        - Samsung: 30% (Historical market leader, massive scale)
+        - Micron: 20% (Significant US-based player)
+        - CXMT: 10% (China's key domestic player, growing influence)
+
+        Apply this context to your analysis. For instance, a strong positive signal for a market leader in a key growth area like HBM (e.g., SK Hynix) should be treated with higher conviction and confidence. A signal for a challenger may require more supporting evidence.
+        `;
+     }
+
+     if (stockSymbol === StockSymbol.NVIDIA) {
+         sectorContextPrompt += `
+        **Sector-Specific Context (GPU Market):**
+        NVIDIA holds a near-monopolistic position in the high-performance GPU market, which is critical for AI development. Our internal analysis projects this **exclusive dominance will continue for at least the next 3 years.** This provides a powerful long-term tailwind. Any short-term negative signals should be weighed against this overwhelming market position. A 'BUY' signal on NVIDIA, especially in an uptrend, can be acted upon with very high confidence.
+        `;
+     }
+
+     if ([StockSymbol.TSMC, StockSymbol.SAMSUNG].includes(stockSymbol)) {
+         sectorContextPrompt += `
+        **Sector-Specific Context (Foundry Market):**
+        This stock is a key player in the semiconductor foundry business. The market share for advanced nodes is distributed as follows:
+        - **TSMC: 80%** (Undisputed market leader with premier technology and client base)
+        - **Samsung: 10%** (The primary challenger, investing heavily to catch up)
+        - **Others: 10%**
+
+        When analyzing TSMC, its 80% market share implies immense stability, pricing power, and a deep moat; treat its signals with high conviction. When analyzing Samsung's foundry business, its 10% share positions it as a high-risk, high-reward challenger. Positive news for Samsung's foundry could have an outsized impact, but it faces a steep climb against the incumbent.
+        `;
+     }
+
+
      const prompt = `
         You are a quantitative analyst at a hedge fund. Your CIO has set the active strategy. Your task is to analyze a single stock within this strategic framework and generate a trade signal by synthesizing technical, fundamental, and trend data.
 
@@ -127,8 +172,10 @@ export const getAiTradeSignal = async (
         - If Strategy is "${HedgeFundStrategy.ALPHA_MOMENTUM}": Focus on the Composite Alpha Score and Trend. High score + UPTREND = BUY. Low score + DOWNTREND = SHORT.
         - If Strategy is "${HedgeFundStrategy.MEAN_REVERSION}": Focus on the Mean Reversion score. High score (>70) suggests 'overbought' (SELL/SHORT). Low score (<30) suggests 'oversold' (BUY).
         - **Crucially, consider the Fundamental Data.** Strong fundamentals (e.g., high EPS growth, reasonable P/E) should increase your confidence in BUY signals, especially in a confirmed 'UPTREND'. Weak fundamentals justify more caution.
-        - You are ONLY permitted to issue a BUY recommendation if the stock is in a confirmed 'UPTREND'.
-        - You are ONLY permitted to issue a SHORT recommendation if the stock is in a confirmed 'DOWNTREND'.
+        - Strongly prefer BUY recommendations only when the stock is in a confirmed 'UPTREND'. You may override this rule if fundamentals are exceptionally strong or a compelling mean-reversion opportunity exists, but you must clearly state the reason for the exception in your 'reason' field.
+        - Similarly, strongly prefer SHORT recommendations only in a confirmed 'DOWNTREND', with the same possibility for justified exceptions.
+        
+        ${sectorContextPrompt}
 
         **Stock & Factor Data:**
         - Stock: ${stock.name} (${stock.koreanName})
@@ -165,13 +212,6 @@ export const getAiTradeSignal = async (
         });
 
         let parsedResponse: AITradeSignal = JSON.parse(response.text.trim());
-        
-        // --- Validation ---
-        if ((trend !== 'UPTREND' && parsedResponse.decision === TradeAction.BUY) || (trend !== 'DOWNTREND' && parsedResponse.decision === TradeAction.SHORT)) {
-           parsedResponse.decision = TradeAction.HOLD;
-           parsedResponse.sharesToTrade = 0;
-           parsedResponse.reason = `Signal ignored (Trend violation): ${parsedResponse.reason}`;
-        }
         
         if (parsedResponse.decision === TradeAction.HOLD) {
             parsedResponse.sharesToTrade = 0;

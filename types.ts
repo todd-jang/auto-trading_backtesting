@@ -1,4 +1,3 @@
-
 export enum StockSymbol {
   SAMSUNG = '005930',
   HYNIX = '000660',
@@ -34,6 +33,7 @@ export enum HedgeFundStrategy {
   MEAN_REVERSION = 'Mean Reversion',
   RISK_OFF = 'Risk Off (Hold)',
   DEEP_HEDGING = 'Deep Hedging (ML)',
+  JOCODING_MA_CROSS = 'Jocoding\'s Simple MA Cross',
 }
 
 export enum MarketRegime {
@@ -94,6 +94,7 @@ export interface Activity {
   shares: number;
   reason: string;
   time: string;
+  confidence?: number;
 }
 
 export interface PortfolioHolding {
@@ -139,6 +140,8 @@ export interface AnalysisFocus {
     fundamentals: FundamentalData;
     activeStrategy?: HedgeFundStrategy;
     pairsSignal?: string;
+    shortMA?: number;
+    longMA?: number;
 }
 
 export interface AITradeSignal {

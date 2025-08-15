@@ -7,10 +7,10 @@ import { initializeAlphaFactors, getUpdatedAlphaFactors } from '../../services/a
 import { initializeFundamentalData, getUpdatedFundamentalData } from '../../services/fundamentalService';
 import { calculateSMA } from '../../services/movingAverage';
 import { getPairsTradingSignal } from '../../services/pairsTradingService';
+import { getMovingAverageCrossSignal, SHORT_MA_PERIOD, LONG_MA_PERIOD } from '../../services/technicalAnalysisService';
 import { detectMarketRegime } from '../../services/marketRegimeService';
-import { initialData } from '../../services/initialChartDataService';
+import { marketDataService, isMarketOpen } from '../../services/marketDataService';
 import { extractFeaturesFromData } from '../../services/mlService';
-import { realtimeDataService } from '../../services/realtimeDataService';
 import { executeLiveTrade } from '../../services/tradingExecutionService';
 import { virtualBankService } from '../../services/virtualBankService';
 import { sendTradeNotification } from '../../services/discordWebhookService';
@@ -24,6 +24,11 @@ import VirtualBank from './VirtualBank';
 
 const AGGREGATION_INTERVAL = 5000; // 5 seconds to create a new candle
 const PAIRS_TRADE_VALUE_KRW = 2_000_000; // Value per leg of a pairs trade
+const TRADING_LOOP_INTERVAL = 5000; // 5 seconds for main decision loop
+
+const initialChartData = marketDataService.getInitialData();
+
+type MarketStatus = 'OPEN' | 'CLOSED';
 
 const Dashboard: React.FC = () => {
     const [isEngineRunning, setIsEngineRunning] = useState<boolean>(false);
@@ -35,11 +40,11 @@ const Dashboard: React.FC = () => {
     const candleAggregatorRef = useRef<{ [key in StockSymbol]?: {open: number, high: number, low: number, close: number, time: string} }>({});
     const setupComplete = useRef(false);
 
-    const [chartData, setChartData] = useState<{ [key in StockSymbol]: CandlestickDataPoint[] }>(initialData);
+    const [chartData, setChartData] = useState<{ [key in StockSymbol]: CandlestickDataPoint[] }>(initialChartData);
     const [normalizedChartData, setNormalizedChartData] = useState<NormalizedChartDataPoint[]>([]);
     const [currentPrices, setCurrentPrices] = useState<{ [key in StockSymbol]: number }>(() => {
          return (Object.keys(STOCKS) as StockSymbol[]).reduce((acc, symbol) => {
-            const data = initialData[symbol];
+            const data = initialChartData[symbol];
             acc[symbol] = data && data.length > 0 ? data[data.length - 1].close : 0;
             return acc;
         }, {} as { [key in StockSymbol]: number });
@@ -59,6 +64,7 @@ const Dashboard: React.FC = () => {
     const [fundamentalData, setFundamentalData] = useState<{ [key in StockSymbol]: FundamentalData }>(initializeFundamentalData());
     
     const [currentAnalysis, setCurrentAnalysis] = useState<AnalysisFocus | null>(null);
+    const [currentAnalystSignal, setCurrentAnalystSignal] = useState<AITradeSignal | null>(null);
     const [mlSignals, setMlSignals] = useState<{ [key in StockSymbol]?: AITradeSignal }>({});
 
     const [liveTime, setLiveTime] = useState(new Date());
@@ -66,13 +72,14 @@ const Dashboard: React.FC = () => {
     const [activeStrategy, setActiveStrategy] = useState<HedgeFundStrategy>(HedgeFundStrategy.RISK_OFF);
     const [strategyReason, setStrategyReason] = useState("");
     const [pairsSignal, setPairsSignal] = useState<string | null>(null);
+    const [marketStatuses, setMarketStatuses] = useState<{ [market: string]: MarketStatus }>({ KOREA: 'CLOSED', USA: 'CLOSED' });
     
     useEffect(() => {
         if (setupComplete.current) return;
         setupComplete.current = true;
 
-        for (const symbol in initialData) {
-            priceHistoryRef.current[symbol as StockSymbol] = initialData[symbol as StockSymbol].map(d => ({ time: d.time, price: d.close }));
+        for (const symbol in initialChartData) {
+            priceHistoryRef.current[symbol as StockSymbol] = initialChartData[symbol as StockSymbol].map(d => ({ time: d.time, price: d.close }));
         }
         
         const initialFunding = async () => {
@@ -90,7 +97,7 @@ const Dashboard: React.FC = () => {
         return () => clearInterval(clockInterval);
     }, []);
 
-    const logActivity = useCallback((action: TradeAction, stock: Stock, shares: number, price: number, reason: string) => {
+    const logActivity = useCallback((action: TradeAction, stock: Stock, shares: number, price: number, reason: string, confidence?: number) => {
         const roundedTime = new Date(Math.floor(Date.now() / AGGREGATION_INTERVAL) * AGGREGATION_INTERVAL).toLocaleTimeString([], { hour12: false });
         
         const newActivity: Activity = {
@@ -98,6 +105,7 @@ const Dashboard: React.FC = () => {
             timestamp: new Date().toLocaleTimeString([], { hour12: false }),
             action, stock, shares, price, reason,
             time: roundedTime,
+            confidence,
         };
         setActivityLog(prev => [newActivity, ...prev.slice(0, 199)]);
     }, []);
@@ -131,7 +139,7 @@ const Dashboard: React.FC = () => {
             }
         }
     
-        logActivity(signal.decision, stock, signal.sharesToTrade, currentPrice, `주문 전송: ${signal.reason}`);
+        logActivity(signal.decision, stock, signal.sharesToTrade, currentPrice, `주문 전송: ${signal.reason}`, signal.confidence);
     
         const confirmation = await executeLiveTrade({
             symbol: stock.symbol,
@@ -193,7 +201,7 @@ const Dashboard: React.FC = () => {
                 return newPortfolio;
             });
 
-            logActivity(action, stock, shares, filledPrice, `주문 체결`);
+            logActivity(action, stock, shares, filledPrice, `주문 체결`, signal.confidence);
 
             if (!isPairTradeLeg) {
                 const CASH_THRESHOLD = isAggressiveMode ? 15_000_000 : 10_000_000;
@@ -324,7 +332,7 @@ const Dashboard: React.FC = () => {
     }, [portfolio.pairTrades, portfolio.holdings, currentPrices, exchangeRate, logActivity]);
 
 
-    const handleRealtimeTick = useCallback(async (tick: LiveTick) => {
+    const handleRealtimeTick = useCallback((tick: LiveTick) => {
         if (!isEngineRunning) return;
 
         setCurrentPrices(prev => ({ ...prev, [tick.symbol]: tick.price }));
@@ -335,53 +343,27 @@ const Dashboard: React.FC = () => {
             history.push({ time: new Date(tick.timestamp).toLocaleTimeString([], { hour12: false }), price: tick.price });
             if(history.length > 500) history.shift();
         }
-        
-        const stock = STOCKS[tick.symbol];
-        const trend = calculateTrend(history);
-        const fundamentals = fundamentalData[tick.symbol];
-        
-        let decisionSignal: AITradeSignal | null = null;
-
-        const currentActiveStrategy = activeStrategy; // Capture strategy at tick time
-        
-        if (currentActiveStrategy === HedgeFundStrategy.PAIRS_TRADING) {
-            const factors = alphaFactors[tick.symbol];
-            setCurrentAnalysis({ stock, factors, trend, fundamentals, activeStrategy: currentActiveStrategy, pairsSignal: pairsSignal || undefined });
-            return;
-        }
-        
-        if (currentActiveStrategy === HedgeFundStrategy.DEEP_HEDGING) {
-            const features = extractFeaturesFromData(history);
-            const mlSignal = await getMlInferenceSignal(stock, features, isAggressiveMode, isLowLatencyMode);
-            setMlSignals(prev => ({ ...prev, [tick.symbol]: mlSignal }));
-            const factors = alphaFactors[tick.symbol];
-            setCurrentAnalysis({ stock, factors, trend, fundamentals, activeStrategy: currentActiveStrategy });
-            decisionSignal = mlSignal;
-        } else if (currentActiveStrategy === HedgeFundStrategy.ALPHA_MOMENTUM || currentActiveStrategy === HedgeFundStrategy.MEAN_REVERSION) {
-            const factors = getUpdatedAlphaFactors(alphaFactors[tick.symbol], history, currentActiveStrategy);
-            setAlphaFactors(prev => ({...prev, [tick.symbol]: factors}));
-            setCurrentAnalysis({ stock, factors, trend, fundamentals, activeStrategy: currentActiveStrategy });
-            decisionSignal = await getAiTradeSignal(stock, currentActiveStrategy, factors, trend, fundamentals, isAggressiveMode, isLowLatencyMode);
-        }
-
-        if (decisionSignal) {
-            await processTradeExecution(stock, decisionSignal, currentActiveStrategy);
-        }
-    }, [isEngineRunning, activeStrategy, alphaFactors, processTradeExecution, isAggressiveMode, isLowLatencyMode, fundamentalData, pairsSignal]);
+    }, [isEngineRunning]);
     
     useEffect(() => {
         if (isEngineRunning) {
-            realtimeDataService.subscribe(handleRealtimeTick);
+            marketDataService.subscribe(handleRealtimeTick);
         } else {
-            realtimeDataService.unsubscribe();
+            marketDataService.unsubscribe();
         }
-        return () => realtimeDataService.unsubscribe();
+        return () => marketDataService.unsubscribe();
     }, [isEngineRunning, handleRealtimeTick]);
     
     useEffect(() => {
         if (isEngineRunning) {
-            const periodicInterval = setInterval(async () => {
+            const mainTradingLoop = setInterval(async () => {
+                // 1. Update market-wide data
                 await setExchangeRate(await getExchangeRate());
+
+                setMarketStatuses({
+                    KOREA: isMarketOpen(StockSymbol.SAMSUNG) ? 'OPEN' : 'CLOSED',
+                    USA: isMarketOpen(StockSymbol.NVIDIA) ? 'OPEN' : 'CLOSED',
+                });
                 
                 setFundamentalData(prev => {
                     const newFundamentals = {...prev};
@@ -394,6 +376,7 @@ const Dashboard: React.FC = () => {
                 const currentMarketRegime = detectMarketRegime(priceHistoryRef.current);
                 setMarketRegime(currentMarketRegime);
                 
+                // 2. CIO makes strategic decision
                 const holdingsValue = Object.entries(portfolio.holdings).reduce((acc, [symbol, holding]) => {
                     if (!holding) return acc;
                     const stockInfo = STOCKS[symbol as StockSymbol];
@@ -408,20 +391,77 @@ const Dashboard: React.FC = () => {
                 setActiveStrategy(strategicDecision.strategy);
                 setStrategyReason(strategicDecision.reason);
                 
-                if (strategicDecision.strategy === HedgeFundStrategy.PAIRS_TRADING) {
-                    const history1 = priceHistoryRef.current[StockSymbol.MICRON];
-                    const history2 = priceHistoryRef.current[StockSymbol.HYNIX];
-                    const signal = getPairsTradingSignal(history1, history2);
-                    if (signal) {
-                        setPairsSignal(signal.reason);
-                        await processPairsTradeExecution(signal);
+                const currentActiveStrategy = strategicDecision.strategy;
+
+                // 3. Execute strategy across all stocks
+                if (currentActiveStrategy === HedgeFundStrategy.PAIRS_TRADING) {
+                     if (isMarketOpen(StockSymbol.MICRON)) { // Check if the pair market is open
+                        const history1 = priceHistoryRef.current[StockSymbol.MICRON];
+                        const history2 = priceHistoryRef.current[StockSymbol.HYNIX];
+                        const signal = getPairsTradingSignal(history1, history2);
+                        if (signal) {
+                            setPairsSignal(signal.reason);
+                            await processPairsTradeExecution(signal);
+                        } else {
+                            setPairsSignal("Pairs Arb: Monitoring spread, no signal.");
+                        }
                     } else {
-                        setPairsSignal("Pairs Arb: Monitoring spread, no signal.");
+                         setPairsSignal("Pairs Arb: Market closed.");
                     }
-                } else {
+                } else if (currentActiveStrategy !== HedgeFundStrategy.RISK_OFF) {
                     setPairsSignal(null);
+                    const stockSymbols = Object.keys(STOCKS) as StockSymbol[];
+                    for (const symbol of stockSymbols) {
+                        if (!isMarketOpen(symbol)) continue; // *** CRITICAL: ONLY TRADE OPEN MARKETS ***
+                        
+                        const stock = STOCKS[symbol];
+                        const history = priceHistoryRef.current[symbol];
+                        if (!history || history.length < 20) continue;
+
+                        const trend = calculateTrend(history);
+                        const fundamentals = fundamentalData[symbol];
+                        
+                        setCurrentAnalysis({ stock, factors: alphaFactors[symbol], trend, fundamentals, activeStrategy: currentActiveStrategy });
+                        setCurrentAnalystSignal(null);
+                        await new Promise(resolve => setTimeout(resolve, 100)); // Small delay for UI update
+
+                        let decisionSignal: AITradeSignal | null = null;
+
+                        if (currentActiveStrategy === HedgeFundStrategy.JOCODING_MA_CROSS) {
+                            const technicalSignal = getMovingAverageCrossSignal(history);
+                            const shortMA = calculateSMA(history, SHORT_MA_PERIOD);
+                            const longMA = calculateSMA(history, LONG_MA_PERIOD);
+                            setCurrentAnalysis({ stock, factors: alphaFactors[symbol], trend, fundamentals, activeStrategy: currentActiveStrategy, shortMA, longMA });
+                            if (technicalSignal) {
+                                decisionSignal = {
+                                    decision: technicalSignal.action, reason: technicalSignal.reason,
+                                    sharesToTrade: isAggressiveMode ? 50 : 20, confidence: 0.9,
+                                };
+                            }
+                        } else if (currentActiveStrategy === HedgeFundStrategy.DEEP_HEDGING) {
+                            const features = extractFeaturesFromData(history);
+                            decisionSignal = await getMlInferenceSignal(stock, features, isAggressiveMode, isLowLatencyMode);
+                            setMlSignals(prev => ({ ...prev, [symbol]: decisionSignal }));
+                        } else if (currentActiveStrategy === HedgeFundStrategy.ALPHA_MOMENTUM || currentActiveStrategy === HedgeFundStrategy.MEAN_REVERSION) {
+                            const factors = getUpdatedAlphaFactors(alphaFactors[symbol], history, currentActiveStrategy);
+                            setAlphaFactors(prev => ({...prev, [symbol]: factors}));
+                            setCurrentAnalysis(prev => ({ ...prev!, factors })); // Update analysis with new factors
+                            decisionSignal = await getAiTradeSignal(stock, currentActiveStrategy, factors, trend, fundamentals, isAggressiveMode, isLowLatencyMode);
+                            setCurrentAnalystSignal(decisionSignal);
+                        }
+                        
+                        if (decisionSignal) {
+                            if (decisionSignal.decision === TradeAction.HOLD) {
+                                logActivity(TradeAction.HOLD, stock, 0, currentPrices[symbol], decisionSignal.reason, decisionSignal.confidence);
+                            } else {
+                                await processTradeExecution(stock, decisionSignal, currentActiveStrategy);
+                            }
+                        }
+                        await new Promise(resolve => setTimeout(resolve, 300)); // Pace the analysis
+                    }
                 }
 
+                // 4. Aggregate new candles for charts
                 setChartData(prevChartData => {
                     const newChartData = { ...prevChartData };
                     for (const symbolStr in STOCKS) {
@@ -453,10 +493,10 @@ const Dashboard: React.FC = () => {
                     return newChartData;
                 });
 
-            }, 5000);
-            return () => clearInterval(periodicInterval);
+            }, TRADING_LOOP_INTERVAL);
+            return () => clearInterval(mainTradingLoop);
         }
-    }, [isEngineRunning, portfolio, currentPrices, isAggressiveMode, isLowLatencyMode, exchangeRate, processPairsTradeExecution]);
+    }, [isEngineRunning, portfolio, currentPrices, isAggressiveMode, isLowLatencyMode, exchangeRate, processPairsTradeExecution, alphaFactors, fundamentalData, logActivity, processTradeExecution]);
     
      useEffect(() => {
         const stockSymbols = Object.keys(STOCKS) as StockSymbol[];
@@ -516,6 +556,7 @@ const Dashboard: React.FC = () => {
                         marketRegime={marketRegime}
                         activeStrategy={activeStrategy}
                         strategyReason={strategyReason}
+                        marketStatuses={marketStatuses}
                     />
                     <CombinedStockChart data={normalizedChartData} activities={activityLog} />
                 </div>
@@ -532,6 +573,7 @@ const Dashboard: React.FC = () => {
                       activeStrategy={activeStrategy}
                       pairsSignal={pairsSignal}
                       mlSignal={currentAnalysis ? mlSignals[currentAnalysis.stock.symbol] || null : null}
+                      analystSignal={currentAnalystSignal}
                     />
                     <ActivityLog activities={activityLog} isLoading={false} />
                 </div>

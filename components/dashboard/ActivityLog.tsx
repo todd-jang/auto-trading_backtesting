@@ -1,4 +1,3 @@
-
 import React from 'react';
 import { Activity, TradeAction, Currency } from '../../types';
 
@@ -90,6 +89,11 @@ const ActivityLog: React.FC<ActivityLogProps> = ({ activities, isLoading }) => {
                                 </div>
                                 <p className="text-sm text-gray-700 dark:text-gray-300 mt-1">{activity.reason}</p>
                                 {tradeInfo && <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">{tradeInfo}</p>}
+                                {activity.confidence !== undefined && (
+                                    <p className="text-xs text-cyan-600 dark:text-cyan-400 font-semibold mt-1">
+                                        신뢰도: {(activity.confidence * 100).toFixed(1)}%
+                                    </p>
+                                )}
                             </div>
                         </div>
                     );
