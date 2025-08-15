@@ -1,0 +1,6 @@
+{
+  "name": "AI Global Stock Autotrading System",
+  "description": "A simulated stock autotrading system for global semiconductor stocks (Samsung, SK Hynix, NVIDIA, TSMC, Micron), powered by a hybrid AI and rule-based engine with real-time exchange rate application.",
+  "requestFramePermissions": [],
+  "prompt": ""
+}
