@@ -1,70 +1,45 @@
-import { BankTransaction, TransactionType } from '../types';
+import { BankTransaction } from '../types';
 
-class VirtualBankService {
-    private balance: number = 20_000_000;
-    private transactions: BankTransaction[] = [];
+type BankActionResponse = {
+    success: boolean;
+    newBalance: number;
+    transaction?: BankTransaction;
+    message?: string;
+};
 
-    constructor() {
-        console.log("Virtual Bank Initialized with Balance:", this.balance);
+class VirtualBankApiClient {
+    public async getBankData(): Promise<{ balance: number; transactions: BankTransaction[] }> {
+        try {
+            const response = await fetch('/api/bank-data');
+            if (!response.ok) throw new Error('Failed to fetch bank data');
+            return await response.json();
+        } catch (error) {
+            console.error(error);
+            return { balance: 0, transactions: [] };
+        }
     }
 
-    private simulateLatency(): Promise<void> {
-        return new Promise(resolve => setTimeout(resolve, 200 + Math.random() * 300));
-    }
-    
-    public getBalance(): number {
-        return this.balance;
+    public async withdraw(amount: number): Promise<BankActionResponse> {
+        return this.performTransaction('withdraw', amount);
     }
 
-    public getTransactions(): BankTransaction[] {
-        return [...this.transactions];
+    public async deposit(amount: number): Promise<BankActionResponse> {
+        return this.performTransaction('deposit', amount);
     }
 
-    public async withdraw(amount: number): Promise<{ success: boolean; newBalance: number; transaction?: BankTransaction; }> {
-        await this.simulateLatency();
-        if (amount <= 0) {
-            return { success: false, newBalance: this.balance };
+    private async performTransaction(type: 'withdraw' | 'deposit', amount: number): Promise<BankActionResponse> {
+        try {
+            const response = await fetch(`/api/bank-${type}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ amount }),
+            });
+            return await response.json();
+        } catch (error) {
+            console.error(`Bank ${type} error:`, error);
+            return { success: false, newBalance: 0, message: 'Client-side error' };
         }
-        if (this.balance < amount) {
-            console.error("Virtual Bank: Withdrawal failed. Insufficient funds.");
-            return { success: false, newBalance: this.balance };
-        }
-        
-        this.balance -= amount;
-        const transaction: BankTransaction = {
-            id: `txn_${Date.now()}_${Math.random()}`,
-            timestamp: new Date().toLocaleTimeString([], { hour12: false }),
-            type: TransactionType.WITHDRAWAL,
-            amount,
-        };
-        this.transactions.unshift(transaction);
-        if (this.transactions.length > 50) {
-            this.transactions.pop();
-        }
-        
-        return { success: true, newBalance: this.balance, transaction };
-    }
-
-    public async deposit(amount: number): Promise<{ success: boolean; newBalance: number; transaction?: BankTransaction; }> {
-        await this.simulateLatency();
-        if (amount <= 0) {
-            return { success: false, newBalance: this.balance };
-        }
-
-        this.balance += amount;
-         const transaction: BankTransaction = {
-            id: `txn_${Date.now()}_${Math.random()}`,
-            timestamp: new Date().toLocaleTimeString([], { hour12: false }),
-            type: TransactionType.DEPOSIT,
-            amount,
-        };
-        this.transactions.unshift(transaction);
-        if (this.transactions.length > 50) {
-            this.transactions.pop();
-        }
-
-        return { success: true, newBalance: this.balance, transaction };
     }
 }
 
-export const virtualBankService = new VirtualBankService();
+export const virtualBankService = new VirtualBankApiClient();
