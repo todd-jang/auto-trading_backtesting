@@ -192,3 +192,36 @@ export interface BankTransaction {
     type: TransactionType;
     amount: number;
 }
+
+// --- Backtesting Types ---
+
+export interface BacktestMetrics {
+    totalReturn: number;
+    sharpeRatio: number;
+    maxDrawdown: number;
+    winRate: number;
+    finalValue: number;
+    totalTrades: number;
+}
+
+export interface EquityDataPoint {
+    time: string;
+    value: number;
+}
+
+export interface BacktestTradeLogEntry {
+    id: string;
+    timestamp: string;
+    stock: Stock;
+    action: TradeAction;
+    price: number;
+    shares: number;
+    cost: number;
+    pnl?: number;
+}
+
+export interface BacktestResult {
+    metrics: BacktestMetrics;
+    equityCurve: EquityDataPoint[];
+    tradeLog: BacktestTradeLogEntry[];
+}

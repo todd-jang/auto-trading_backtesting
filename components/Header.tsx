@@ -35,8 +35,19 @@ const ThemeToggle: React.FC = () => {
     );
 };
 
+const BacktestIcon: React.FC = () => (
+    <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+    </svg>
+);
 
-const Header: React.FC = () => {
+
+interface HeaderProps {
+    onToggleBacktestModal: () => void;
+}
+
+
+const Header: React.FC<HeaderProps> = ({ onToggleBacktestModal }) => {
   return (
     <header className="bg-white/70 dark:bg-gray-900/80 backdrop-blur-sm border-b border-gray-200 dark:border-gray-700/50 sticky top-0 z-10">
       <div className="container mx-auto px-4 sm:px-6 lg:px-8 flex items-center justify-between h-16">
@@ -47,7 +58,16 @@ const Header: React.FC = () => {
              <p className="text-xs text-gray-500 dark:text-gray-400">Live Automated Trading Engine</p>
           </div>
         </div>
-        <ThemeToggle />
+         <div className="flex items-center space-x-4">
+            <button
+                onClick={onToggleBacktestModal}
+                className="p-2 rounded-full bg-gray-200 dark:bg-gray-800 hover:bg-gray-300 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300 transition-colors"
+                aria-label="Open Backtester"
+            >
+                <BacktestIcon />
+            </button>
+            <ThemeToggle />
+        </div>
       </div>
     </header>
   );
